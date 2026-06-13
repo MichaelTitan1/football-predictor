@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Football AI — Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <h1 class="brand">football-ai-system</h1>
+      <p class="tag">Live predictions • Best picks • Match analytics</p>
+    </div>
+  </header>
+
+  <main class="container layout">
+    <section class="panel" id="upcoming-panel">
+      <div class="panel-header">
+        <h2>Upcoming Matches</h2>
+        <div class="controls">
+          <button id="btn-load-sample" class="btn">Load Sample</button>
+          <button id="btn-predict-all" class="btn primary">Predict All</button>
+        </div>
+      </div>
+
+      <div id="matches-list" class="matches-list">
+        <!-- Matches rendered here -->
+      </div>
+
+      <form id="add-match-form" class="add-form">
+        <input id="home-input" placeholder="Home team" required />
+        <input id="away-input" placeholder="Away team" required />
+        <button id="btn-add" class="btn">Add Match</button>
+      </form>
+
+      <div id="upcoming-message" class="message"></div>
+    </section>
+
+    <aside class="panel sidebar" id="sidebar-panel">
+      <div class="panel-header">
+        <h2>Best Picks</h2>
+        <button id="btn-refresh-picks" class="btn small">Refresh</button>
+      </div>
+
+      <div id="best-picks" class="best-picks">
+        <!-- best picks list -->
+      </div>
+
+      <div class="panel-header">
+        <h3>Selected Match</h3>
+      </div>
+      <div id="selected-match" class="selected-match">
+        <p class="muted">No match selected — click a match to see details</p>
+      </div>
+
+      <div id="api-status" class="api-status muted"></div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <small>© Football AI System</small>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
