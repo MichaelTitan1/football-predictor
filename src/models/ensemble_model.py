@@ -123,6 +123,7 @@ def check_feature_consistency(feature_sets: List[List[str]]) -> bool:
 def _train_catboost(X_train, y_train, X_val, y_val, random_seed=42, cb_params: Optional[Dict] = None):
     if CatBoostClassifier is None:
         raise ImportError("catboost is required for CatBoost training")
+
     params = cb_params.copy() if cb_params else {
         "iterations": 2000,
         "learning_rate": 0.03,
@@ -134,18 +135,26 @@ def _train_catboost(X_train, y_train, X_val, y_val, random_seed=42, cb_params: O
         "od_wait": 50,
         "verbose": 100,
     }
+
     model = CatBoostClassifier(**params)
     logger.info("Training CatBoost (%d rows)", len(X_train))
-    model.fit(X_train, y_train, eval_set=(X_val, y_val), use_best_model=True)
-    return model
 
+    model.fit(
+        X_train,
+        y_train,
+        eval_set=(X_val, y_val),
+        use_best_model=True,
+        cat_features="auto"   # ✅ FIX ADDED HERE
+    )
+
+    return model
 
 def _train_lightgbm(X_train, y_train, X_val, y_val, random_seed=42, lgb_params: Optional[Dict] = None):
     import lightgbm as lgb  # type: ignore
 
     default = {
         "objective": "multiclass",
-        "num_class": len(y_train.unique()),
+        "num_class": len(np.unique(y_train)),
         "learning_rate": 0.05,
         "num_leaves": 31,
         "max_depth": 8,
@@ -153,11 +162,25 @@ def _train_lightgbm(X_train, y_train, X_val, y_val, random_seed=42, lgb_params: 
         "metric": "multi_logloss",
         "verbosity": -1,
     }
-    params = default if lgb_params is None else {**default, **lgb_params}
+
+    params = {**default, **(lgb_params or {})}
+
     train_data = lgb.Dataset(X_train, label=y_train)
     val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+
     logger.info("Training LightGBM (%d rows)", len(X_train))
-    booster = lgb.train(params, train_data, num_boost_round=2000, valid_sets=[val_data], early_stopping_rounds=50, verbose_eval=100)
+
+    booster = lgb.train(
+        params,
+        train_data,
+        num_boost_round=2000,
+        valid_sets=[val_data],
+        callbacks=[
+            lgb.early_stopping(50),
+            lgb.log_evaluation(100)
+        ]
+    )
+
     return booster
 
 
@@ -165,22 +188,33 @@ def _train_xgboost(X_train, y_train, X_val, y_val, random_seed=42, xgb_params: O
     import xgboost as xgb  # type: ignore
 
     num_class = len(np.unique(y_train))
+
     default = {
         "objective": "multi:softprob",
+        "num_class": num_class,
         "eta": 0.05,
         "max_depth": 6,
         "seed": random_seed,
         "eval_metric": "mlogloss",
-        "verbosity": 1,
     }
-    params = default if xgb_params is None else {**default, **xgb_params}
+
+    params = {**default, **(xgb_params or {})}
+
     dtrain = xgb.DMatrix(X_train, label=y_train)
     dval = xgb.DMatrix(X_val, label=y_val)
-    logger.info("Training XGBoost (%d rows)", len(X_train))
-    evals = [(dtrain, "train"), (dval, "val")]
-    booster = xgb.train(params, dtrain, num_boost_round=2000, evals=evals, early_stopping_rounds=50)
-    return booster
 
+    logger.info("Training XGBoost (%d rows)", len(X_train))
+
+    booster = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=2000,
+        evals=[(dtrain, "train"), (dval, "val")],
+        early_stopping_rounds=50,
+        verbose_eval=100
+    )
+
+    return booster
 
 def _save_models(models: Dict[str, object], model_dir: Union[str, Path]):
     model_dir = Path(model_dir)
@@ -360,74 +394,76 @@ def load_ensemble_models(model_dir: str = "models") -> Dict[str, Optional[object
     return _load_models(Path(model_dir))
 
 
-def predict_ensemble(models: Dict[str, object], feature_row_or_X: Union[pd.DataFrame, pd.Series], weights: Optional[Dict[str, float]] = None) -> Dict:
-    """Predict probabilities and aggregate using weighted averaging.
+def predict_ensemble(
+    models: Dict[str, object],
+    feature_row_or_X: Union[pd.DataFrame, pd.Series],
+    weights: Optional[Dict[str, float]] = None
+) -> Dict:
+    """Predict probabilities and aggregate using weighted averaging."""
 
-    Args:
-      models: dict with keys 'cat', 'lgb', 'xgb' mapped to model objects
-      feature_row_or_X: single-row DataFrame or Series or multi-row DataFrame
-      weights: optional dict of weights; default uses DEFAULT_WEIGHTS
-
-    Returns (for single-row input): {
-      "home_win": float, "draw": float, "away_win": float, "model_agreement_score": float
-    }
-    For multi-row input returns list of dicts.
-    """
     if weights is None:
         weights = DEFAULT_WEIGHTS
+
     total = sum(weights.values())
     weights = {k: float(v) / total for k, v in weights.items()}
 
     single_input = False
+
     if isinstance(feature_row_or_X, pd.Series):
         X = feature_row_or_X.to_frame().T
         single_input = True
+
     elif isinstance(feature_row_or_X, pd.DataFrame):
         X = feature_row_or_X.copy()
         if X.shape[0] == 1:
             single_input = True
+
     else:
         raise ValueError("feature_row_or_X must be a pandas DataFrame or Series")
 
-    # Ensure feature columns alignment: models must have been trained on same feature_cols; we attempt to use columns present
-    cols = list(X.columns)
-
-    # Collect per-model probabilities in order [H,D,A] or model.classes_
+    # ----------------------------
+    # COLLECT MODEL PREDICTIONS
+    # ----------------------------
     prob_arrays = []
     class_orders = []
     model_names = []
 
     # CatBoost
     if models.get("cat") is not None:
-        m = models.get("cat")
         try:
+            m = models["cat"]
             p = m.predict_proba(X)
-            prob_arrays.append(p)
+            prob_arrays.append(np.asarray(p))
             class_orders.append(list(m.classes_))
             model_names.append("cat")
         except Exception as e:
-            logger.exception("CatBoost predict_proba failed: %s", e)
+            logger.exception("CatBoost predict failed: %s", e)
+
     # LightGBM
     if models.get("lgb") is not None:
-        import lightgbm as lgb  # type: ignore
-
-        m = models.get("lgb")
         try:
+            import lightgbm as lgb  # type: ignore
+            m = models["lgb"]
             p = m.predict(X)
+            p = np.asarray(p)
+            if p.ndim == 1:
+                p = p.reshape(-1, 1)
             prob_arrays.append(p)
-            # lightgbm returns prob matrix in order 0..num_class-1, but we need to map numeric labels to FTR labels; assume label encoding consistent
             class_orders.append(None)
             model_names.append("lgb")
         except Exception as e:
             logger.exception("LightGBM predict failed: %s", e)
+
     # XGBoost
     if models.get("xgb") is not None:
-        import xgboost as xgb  # type: ignore
-
-        m = models.get("xgb")
         try:
+            import xgboost as xgb  # type: ignore
+            m = models["xgb"]
             dmat = xgb.DMatrix(X)
             p = m.predict(dmat)
+            p = np.asarray(p)
+            if p.ndim == 1:
+                p = p.reshape(-1, 1)
             prob_arrays.append(p)
             class_orders.append(None)
             model_names.append("xgb")
@@ -437,81 +473,94 @@ def predict_ensemble(models: Dict[str, object], feature_row_or_X: Union[pd.DataF
     if len(prob_arrays) == 0:
         raise RuntimeError("No model predictions available")
 
-    # Harmonize class order: try to use CatBoost classes as canonical if available
+    # ----------------------------
+    # CLASS ORDER HANDLING
+    # ----------------------------
     canonical = None
-    if models.get("cat") is not None and hasattr(models.get("cat"), "classes_"):
-        canonical = list(models.get("cat").classes_)
+    if models.get("cat") is not None and hasattr(models["cat"], "classes_"):
+        canonical = list(models["cat"].classes_)
     else:
-        # fallback to ['H','D','A']
         canonical = ["H", "D", "A"]
 
-    # Convert each prob array to shape (n_rows, 3) ordered by canonical labels
+    # ----------------------------
+    # ALIGN PROBABILITIES
+    # ----------------------------
     probs_aligned = []
+
     for idx, arr in enumerate(prob_arrays):
-        # arr shape (n_rows, k)
         arr = np.asarray(arr)
+
         if arr.ndim == 1:
-            # some libs can return flat vectors for binary; but we expect multi-class; handle gracefully
             arr = arr.reshape(-1, 1)
+
         k = arr.shape[1]
-        # If class_orders provided and matches canonical, reorder
         co = class_orders[idx]
+
+        aligned = np.zeros((arr.shape[0], len(canonical)), dtype=float)
+
         if co is None:
-            # assume ordering numeric 0..k-1 maps to canonical in same order
-            if k == len(canonical):
-                aligned = arr
-            else:
-                # attempt to pad/trim
-                aligned = np.zeros((arr.shape[0], len(canonical)), dtype=float)
-                min_k = min(k, len(canonical))
-                aligned[:, :min_k] = arr[:, :min_k]
+            min_k = min(k, len(canonical))
+            aligned[:, :min_k] = arr[:, :min_k]
         else:
-            # reorder columns according to canonical
-            aligned = np.zeros((arr.shape[0], len(canonical)), dtype=float)
             for j, lab in enumerate(canonical):
                 if lab in co:
                     aligned[:, j] = arr[:, co.index(lab)]
-                else:
-                    aligned[:, j] = 0.0
+
         probs_aligned.append(aligned)
 
-    # Weighted average
+    # ----------------------------
+    # WEIGHTED AVERAGE
+    # ----------------------------
     n_rows = probs_aligned[0].shape[0]
     avg_probs = np.zeros((n_rows, len(canonical)), dtype=float)
+
     for model_name, prob in zip(model_names, probs_aligned):
         w = weights.get(model_name, 0.0)
         avg_probs += w * prob
 
-    # Normalize per-row
+    # ----------------------------
+    # NORMALIZATION (SAFE)
+    # ----------------------------
     row_sums = avg_probs.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1.0
     normalized = avg_probs / row_sums
 
-    # Agreement score: fraction of models that predicted same top label (0-1)
+    # FINAL SAFETY CHECK
+    normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+
+    row_sums = normalized.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1.0
+    normalized = normalized / row_sums
+
+    # ----------------------------
+    # AGREEMENT SCORE
+    # ----------------------------
     agreement_scores = []
+
     for i in range(n_rows):
         top_labels = []
+
         for prob in probs_aligned:
             top = int(np.argmax(prob[i]))
             top_labels.append(canonical[top])
-        # compute fraction that equals most common
-        vals, counts = np.unique(top_labels, return_counts=True)
-        max_count = int(counts.max())
-        agreement_scores.append(float(max_count) / float(len(top_labels)))
 
+        vals, counts = np.unique(top_labels, return_counts=True)
+        agreement_scores.append(float(counts.max()) / float(len(top_labels)))
+
+    # ----------------------------
+    # OUTPUT
+    # ----------------------------
     outputs = []
+
     for i in range(n_rows):
-        out = {
+        outputs.append({
             "home_win": float(normalized[i, canonical.index("H")]) if "H" in canonical else 0.0,
             "draw": float(normalized[i, canonical.index("D")]) if "D" in canonical else 0.0,
             "away_win": float(normalized[i, canonical.index("A")]) if "A" in canonical else 0.0,
             "model_agreement_score": float(agreement_scores[i]),
-        }
-        outputs.append(out)
+        })
 
-    if single_input:
-        return outputs[0]
-    return outputs
+    return outputs[0] if single_input else outputs
 
 
 # Expose simple wrappers
