@@ -1,102 +1,134 @@
 """
 ensemble_model.py
 
-Ensemble training and prediction utilities combining CatBoost, LightGBM, and XGBoost.
+CatBoost-only training and prediction for the football-predictor project.
 
-Public API:
-- train_ensemble(df, *, model_dir='models', weights=None, random_seed=42,
-                 val_start_date=None, time_gap_days=0)
-- load_ensemble_models(model_dir='models') -> dict
-- predict_ensemble(models, feature_row_or_X, weights=None,
-                   artifacts=None, model_dir=None) -> dict
-- check_feature_consistency(feature_names_list) -> bool
+Public API
+----------
+- train_catboost(df, *, model_path='models/football_model.cbm', ...) -> dict
+- load_prediction_model(path='models/football_model.cbm') -> CatBoostClassifier
+- load_artifacts(path=None) -> dict
+- prepare_match_features(home_team, away_team, feature_data, model=None, artifacts=None) -> pd.DataFrame
+- predict_match(model, feature_row, artifacts=None) -> dict
+- ensure_data(merged_path, raw_dir) -> Path
+- bootstrap_and_train() -> dict
+    Convenience entrypoint: ensures data exists (downloads from
+    football-data.co.uk if needed), then trains + saves + reloads + predicts.
 
-Design notes
-------------
-- All three models share **one** preprocessing layer
-  (``ensemble_preprocessing``). This guarantees that:
-    * no raw string columns ever reach LightGBM or XGBoost;
-    * categorical columns are encoded with a stable, persisted mapping;
-    * the label encoder (H/D/A) is identical for all three models;
-    * the feature column order used at training time is identical to the one
-      used at prediction time, including after a model reload.
-- Time-based train/validation split to avoid leakage.
-- Logs per-model performance and saves artifacts.
-- Combines probabilities via weighted averaging and renormalizes.
-- Computes a model agreement score.
+Run end-to-end with:
+    python src/models/ensemble_model.py
+
+Why CatBoost only
+-----------------
+We previously ran a CatBoost + LightGBM + XGBoost ensemble. In practice the
+gradient boosters were memorizing `HomeTeam -> FTR` (LGB/XGB hit 100% val
+accuracy from team-identity leakage). CatBoost's native categorical handling
+gives honest signal and keeps the pipeline simple — one model, one file.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
-# Delayed imports for ML libs
+# Allow `python src/models/ensemble_model.py` to find sibling packages
+# without requiring the user to set PYTHONPATH manually.
+_THIS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _THIS_DIR.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 try:
-    from catboost import CatBoostClassifier
+    from catboost import CatBoostClassifier, Pool
 except Exception:  # pragma: no cover
     CatBoostClassifier = None
+    Pool = None
 
 try:
-    from sklearn.metrics import accuracy_score, log_loss
-except Exception:  # pragma: no cover
+    from sklearn.metrics import accuracy_score, log_loss, classification_report
+    from sklearn.preprocessing import LabelEncoder
+except Exception:
     accuracy_score = None
     log_loss = None
+    classification_report = None
+    LabelEncoder = None
 
-from src.models.ensemble_preprocessing import (
-    EnsembleArtifacts,
-    CANONICAL_LABEL_ORDER,
-    fit_preprocessing,
-    transform,
-    decode_predictions,
-)
+from src.features.preprocessing import build_features, FEATURE_SCHEMA  # noqa: E402
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    logger.addHandler(handler)
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logger.addHandler(h)
 logger.setLevel(logging.INFO)
 
 
-DEFAULT_WEIGHTS = {"cat": 0.5, "lgb": 0.25, "xgb": 0.25}
+# Canonical artifact locations. Single source of truth so save/load never drift.
+DEFAULT_MODEL_PATH = "models/football_model.cbm"
+DEFAULT_ARTIFACT_PATH = "models/football_model_artifacts.json"
+DEFAULT_REPORT_PATH = "models/football_model_report.txt"
+DEFAULT_IMPORTANCE_PATH = "models/football_model_feature_importance.csv"
+MERGED_DATASET_PATH = "data/processed/merged_dataset.csv"
+RAW_DIR = "data/raw"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _require_ml_libs():
-    missing = []
+# --------------------------------------------------------------------------- #
+# Dependency checks                                                           #
+# --------------------------------------------------------------------------- #
+def _require_catboost():
     if CatBoostClassifier is None:
-        missing.append("catboost")
-    try:
-        import lightgbm as lgb  # type: ignore
-    except Exception:
-        missing.append("lightgbm")
-    try:
-        import xgboost as xgb  # type: ignore
-    except Exception:
-        missing.append("xgboost")
-    if missing:
         raise ImportError(
-            f"Missing ML libraries: {', '.join(missing)}. Install to use ensemble training/prediction."
+            "catboost is required. Install with `pip install catboost`."
         )
 
 
+def _require_sklearn():
+    if accuracy_score is None or LabelEncoder is None:
+        raise ImportError(
+            "scikit-learn is required. Install with `pip install scikit-learn`."
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Data bootstrapping                                                          #
+# --------------------------------------------------------------------------- #
+def ensure_data(
+    merged_path: Union[str, Path] = MERGED_DATASET_PATH,
+    raw_dir: Union[str, Path] = RAW_DIR,
+) -> Path:
+    """Make sure a merged CSV exists. Downloads from football-data.co.uk if not.
+
+    Returns the path to the merged CSV. Raises if it cannot be produced.
+    """
+    merged_path = Path(merged_path)
+    if merged_path.exists() and merged_path.stat().st_size > 0:
+        logger.info("Using existing merged dataset: %s", merged_path)
+        return merged_path
+
+    logger.info("Merged dataset missing; building from raw CSVs in %s", raw_dir)
+    from src.data_pipeline.prepare_merged_dataset import build_merged_dataset
+    df = build_merged_dataset(raw_dir=str(raw_dir), out_path=str(merged_path))
+    if df.empty:
+        raise RuntimeError("Failed to build a non-empty merged dataset.")
+    return merged_path
+
+
+# --------------------------------------------------------------------------- #
+# Time-based split                                                            #
+# --------------------------------------------------------------------------- #
 def _time_split(
     df: pd.DataFrame,
     val_start_date: Optional[str] = None,
     time_gap_days: int = 0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if "Date" not in df.columns:
-        raise ValueError("train_ensemble requires a 'Date' column")
+        raise ValueError("Input must contain a 'Date' column")
     d = df.copy().sort_values("Date").reset_index(drop=True)
     if val_start_date is None:
         cutoff = d["Date"].quantile(0.80)
@@ -108,57 +140,82 @@ def _time_split(
     else:
         train_mask = d["Date"] < cutoff
     val_mask = d["Date"] >= cutoff
-    train_df = d.loc[train_mask].reset_index(drop=True)
-    val_df = d.loc[val_mask].reset_index(drop=True)
-    logger.info(
-        "Ensemble time split: train=%d val=%d cutoff=%s",
-        len(train_df), len(val_df), str(cutoff),
-    )
-    return train_df, val_df
+    return d.loc[train_mask].reset_index(drop=True), d.loc[val_mask].reset_index(drop=True)
 
 
-def check_feature_consistency(feature_sets: List[List[str]]) -> bool:
-    """Ensure all feature sets are identical lists/sets of names."""
-    if not feature_sets:
-        return True
-    base = list(feature_sets[0])
-    for s in feature_sets[1:]:
-        if list(s) != base:
-            logger.error(
-                "Feature mismatch detected. Base length %d vs other length %d",
-                len(base), len(s),
-            )
-            return False
-    return True
+# --------------------------------------------------------------------------- #
+# Feature matrix                                                              #
+# --------------------------------------------------------------------------- #
+def _build_xy(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, List[str], List[str]]:
+    """Turn a raw match DataFrame into (X, y, feature_cols, cat_cols).
+
+    Uses `src.features.preprocessing.build_features`, which:
+    * computes the 20 advanced features,
+    * keeps only the columns allowed by FEATURE_SCHEMA,
+    * drops identifiers (Date, HomeTeam, AwayTeam) and the target (FTR).
+    """
+    feats = build_features(df)
+    if "FTR" not in feats.columns:
+        raise ValueError("Feature frame must include target column 'FTR'")
+    y = feats["FTR"].astype(str)
+
+    numeric_cols = [c for c in FEATURE_SCHEMA["numeric"] if c in feats.columns]
+    cat_cols = [c for c in FEATURE_SCHEMA["categorical"] if c in feats.columns]
+    feature_cols = numeric_cols + cat_cols
+    X = feats[feature_cols].copy()
+
+    # Cast categoricals to string so CatBoost sees stable types.
+    for c in cat_cols:
+        X[c] = X[c].astype(object).where(X[c].notna(), "UNK").astype(str)
+
+    return X, y, feature_cols, cat_cols
 
 
-# ---------------------------------------------------------------------------
-# Per-model trainers
-# ---------------------------------------------------------------------------
-
-
-def _train_catboost(
-    X_train: pd.DataFrame,
-    y_train: np.ndarray,
-    X_val: pd.DataFrame,
-    y_val: np.ndarray,
-    cat_feature_indices: List[int],
+# --------------------------------------------------------------------------- #
+# Train                                                                       #
+# --------------------------------------------------------------------------- #
+def train_catboost(
+    df: pd.DataFrame,
+    *,
+    model_path: Union[str, Path] = DEFAULT_MODEL_PATH,
+    val_start_date: Optional[str] = None,
+    time_gap_days: int = 0,
     random_seed: int = 42,
     cb_params: Optional[Dict] = None,
-):
-    """Train CatBoost.
+) -> Dict:
+    """Train a CatBoost classifier on advanced features with a time-based split.
 
-    Categorical columns are passed by integer position so that CatBoost uses
-    its native categorical handling, while everything else is treated as a
-    numeric feature. The label is integer-encoded (0/1/2 = H/D/A).
+    Saves the trained model + a small artifact JSON to `model_path` /
+    `model_path` parent directory.
     """
-    if CatBoostClassifier is None:
-        raise ImportError("catboost is required for CatBoost training")
+    _require_catboost()
+    _require_sklearn()
 
-    # CatBoost needs the original (string) labels for display, but it can also
-    # train on integer labels with loss_function='MultiClass'. We use the
-    # integer-encoded labels for full consistency with the other models.
-    params = cb_params.copy() if cb_params else {
+    df = df.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", format="mixed")
+    df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+
+    train_df, val_df = _time_split(df, val_start_date=val_start_date, time_gap_days=time_gap_days)
+    logger.info("Time split: train=%d val=%d", len(train_df), len(val_df))
+
+    X_train, y_train, feature_cols, cat_cols = _build_xy(train_df)
+    X_val, y_val, _, _ = _build_xy(val_df)
+    cat_feature_indices = [feature_cols.index(c) for c in cat_cols]
+
+    logger.info(
+        "Train shape=%s val shape=%s, n_features=%d (n_cat=%d)",
+        X_train.shape, X_val.shape, len(feature_cols), len(cat_cols),
+    )
+
+    # Encode target once. Persist the encoder alongside the model so the
+    # prediction path can map probabilities back to H/D/A in the right order.
+    le = LabelEncoder()
+    y_train_enc = le.fit_transform(y_train)
+    y_val_enc = le.transform(y_val)
+    logger.info("LabelEncoder classes: %s", list(le.classes_))
+
+    params = (cb_params or {}).copy()
+    defaults = {
         "iterations": 2000,
         "learning_rate": 0.03,
         "depth": 6,
@@ -169,560 +226,284 @@ def _train_catboost(
         "od_wait": 50,
         "verbose": 100,
     }
+    for k, v in defaults.items():
+        params.setdefault(k, v)
 
     model = CatBoostClassifier(**params)
-    logger.info("Training CatBoost (%d rows, %d features, %d cat)",
-                len(X_train), X_train.shape[1], len(cat_feature_indices))
+    logger.info("Training CatBoost on %d rows / %d features...", len(X_train), len(feature_cols))
 
-    model.fit(
-        X_train,
-        y_train,
-        eval_set=(X_val, y_val),
-        use_best_model=True,
-        cat_features=cat_feature_indices,  # list[int]
-    )
+    train_pool = Pool(X_train, y_train_enc, cat_features=cat_feature_indices)
+    val_pool = Pool(X_val, y_val_enc, cat_features=cat_feature_indices)
 
-    return model
+    model.fit(train_pool, eval_set=val_pool, use_best_model=True)
 
-
-def _train_lightgbm(
-    X_train: pd.DataFrame,
-    y_train: np.ndarray,
-    X_val: pd.DataFrame,
-    y_val: np.ndarray,
-    cat_feature_indices: List[int],
-    random_seed: int = 42,
-    lgb_params: Optional[Dict] = None,
-):
-    """Train LightGBM with the shared encoded feature matrix."""
-    import lightgbm as lgb  # type: ignore
-
-    num_class = int(len(np.unique(np.concatenate([y_train, y_val]))))
-
-    default = {
-        "objective": "multiclass",
-        "num_class": num_class,
-        "learning_rate": 0.05,
-        "num_leaves": 31,
-        "max_depth": 8,
-        "seed": random_seed,
-        "metric": "multi_logloss",
-        "verbosity": -1,
-    }
-    params = {**default, **(lgb_params or {})}
-
-    # LightGBM accepts a DataFrame whose dtypes are int/float/bool.
-    # Our preprocess guarantees that. We additionally declare which integer
-    # columns are categorical so the booster treats them as such.
-    train_data = lgb.Dataset(
-        X_train,
-        label=y_train,
-        categorical_feature=cat_feature_indices or "auto",
-        free_raw_data=False,
-    )
-    val_data = lgb.Dataset(
-        X_val,
-        label=y_val,
-        reference=train_data,
-        categorical_feature=cat_feature_indices or "auto",
-        free_raw_data=False,
-    )
-
-    logger.info("Training LightGBM (%d rows, %d features, %d cat)",
-                len(X_train), X_train.shape[1], len(cat_feature_indices))
-
-    booster = lgb.train(
-        params,
-        train_data,
-        num_boost_round=2000,
-        valid_sets=[val_data],
-        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)],
-    )
-
-    return booster
-
-
-def _train_xgboost(
-    X_train: pd.DataFrame,
-    y_train: np.ndarray,
-    X_val: pd.DataFrame,
-    y_val: np.ndarray,
-    cat_feature_indices: List[int],
-    random_seed: int = 42,
-    xgb_params: Optional[Dict] = None,
-):
-    """Train XGBoost with the shared encoded feature matrix."""
-    import xgboost as xgb  # type: ignore
-
-    num_class = int(len(np.unique(np.concatenate([y_train, y_val]))))
-
-    default = {
-        "objective": "multi:softprob",
-        "num_class": num_class,
-        "eta": 0.05,
-        "max_depth": 6,
-        "seed": random_seed,
-        "eval_metric": "mlogloss",
-    }
-    params = {**default, **(xgb_params or {})}
-
-    # XGBoost expects only int/float/bool; our preprocess guarantees that.
-    dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=list(X_train.columns))
-    dval = xgb.DMatrix(X_val, label=y_val, feature_names=list(X_val.columns))
-
-    logger.info("Training XGBoost (%d rows, %d features)",
-                len(X_train), X_train.shape[1])
-
-    booster = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=2000,
-        evals=[(dtrain, "train"), (dval, "val")],
-        early_stopping_rounds=50,
-        verbose_eval=100,
-    )
-
-    return booster
-
-
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
-
-
-def _save_models(models: Dict[str, object], model_dir: Union[str, Path]) -> Dict[str, str]:
-    model_dir = Path(model_dir)
-    model_dir.mkdir(parents=True, exist_ok=True)
-    paths: Dict[str, str] = {}
-
-    if "cat" in models and models["cat"] is not None:
-        cat_path = model_dir / "ensemble_cat.cbm"
-        models["cat"].save_model(str(cat_path))
-        paths["cat"] = str(cat_path)
-        logger.info("Saved CatBoost to %s", cat_path)
-
-    if "lgb" in models and models["lgb"] is not None:
-        import lightgbm as lgb  # type: ignore
-        lgb_path = model_dir / "ensemble_lgb.txt"
-        models["lgb"].save_model(str(lgb_path))
-        paths["lgb"] = str(lgb_path)
-        logger.info("Saved LightGBM to %s", lgb_path)
-
-    if "xgb" in models and models["xgb"] is not None:
-        import xgboost as xgb  # type: ignore
-        # XGBoost 3.x infers the format from the file extension.
-        # Use .ubj to silence the "Unknown file format" warning.
-        xgb_path = model_dir / "ensemble_xgb.ubj"
-        models["xgb"].save_model(str(xgb_path))
-        paths["xgb"] = str(xgb_path)
-        logger.info("Saved XGBoost to %s", xgb_path)
-
-    return paths
-
-
-def _load_models(model_dir: Union[str, Path]) -> Dict[str, Optional[object]]:
-    model_dir = Path(model_dir)
-    models: Dict[str, Optional[object]] = {"cat": None, "lgb": None, "xgb": None}
-
-    cat_path = model_dir / "ensemble_cat.cbm"
-    if cat_path.exists():
-        if CatBoostClassifier is None:
-            raise ImportError("catboost not installed to load CatBoost model")
-        m = CatBoostClassifier()
-        m.load_model(str(cat_path))
-        models["cat"] = m
-        logger.info("Loaded CatBoost from %s", cat_path)
-
-    lgb_path = model_dir / "ensemble_lgb.txt"
-    if lgb_path.exists():
-        import lightgbm as lgb  # type: ignore
-        booster = lgb.Booster(model_file=str(lgb_path))
-        models["lgb"] = booster
-        logger.info("Loaded LightGBM from %s", lgb_path)
-
-    # XGBoost 3.x: prefer the .ubj extension; fall back to .model for
-    # backwards compatibility with files saved by older versions of this code.
-    xgb_path = model_dir / "ensemble_xgb.ubj"
-    if not xgb_path.exists():
-        xgb_path = model_dir / "ensemble_xgb.model"
-    if xgb_path.exists():
-        import xgboost as xgb  # type: ignore
-        booster = xgb.Booster()
-        booster.load_model(str(xgb_path))
-        models["xgb"] = booster
-        logger.info("Loaded XGBoost from %s", xgb_path)
-
-    return models
-
-
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
-
-def train_ensemble(
-    df: pd.DataFrame,
-    *,
-    model_dir: str = "models",
-    weights: Optional[Dict[str, float]] = None,
-    random_seed: int = 42,
-    val_start_date: Optional[str] = None,
-    time_gap_days: int = 0,
-) -> Dict:
-    """Train CatBoost, LightGBM, and XGBoost on a single shared feature matrix.
-
-    Returns a dict with trained model objects, paths, metrics per model,
-    saved paths, weights, the preprocessing artifacts, and the exact
-    ``feature_cols`` list used.
-    """
-    _require_ml_libs()
-
-    if weights is None:
-        weights = DEFAULT_WEIGHTS
-    total = float(sum(weights.values()))
-    if total <= 0:
-        raise ValueError("Ensemble weights must sum to a positive value")
-    weights = {k: float(v) / total for k, v in weights.items()}
-
-    # ---- 1. Unified preprocessing on the full df -------------------------
-    # This is the single source of truth for feature columns and types.
-    X_all, y_all_int, y_all_str, artifacts = fit_preprocessing(df)
-
-    # ---- 2. Time-based split ---------------------------------------------
-    if "Date" not in df.columns:
-        raise ValueError("train_ensemble requires a 'Date' column")
-    df_idx = df.copy()
-    df_idx["Date"] = pd.to_datetime(df_idx["Date"], errors="coerce")
-    if df_idx["Date"].isna().any():
-        n_bad = int(df_idx["Date"].isna().sum())
-        raise ValueError(f"{n_bad} rows have unparseable Date values")
-
-    df_idx = df_idx.reset_index(drop=True)
-    train_df, val_df = _time_split(df_idx, val_start_date, time_gap_days)
-
-    train_pos = train_df.index.to_numpy()
-    val_pos = val_df.index.to_numpy()
-
-    X_train = X_all.iloc[train_pos].reset_index(drop=True)
-    X_val = X_all.iloc[val_pos].reset_index(drop=True)
-    y_train = y_all_int[train_pos]
-    y_val = y_all_int[val_pos]
-
+    # Evaluate
+    metrics: Dict[str, Optional[float]] = {"accuracy": None, "log_loss": None}
+    y_prob = model.predict_proba(X_val)
+    y_pred_enc = np.argmax(y_prob, axis=1)
+    if accuracy_score is not None:
+        metrics["accuracy"] = float(accuracy_score(y_val_enc, y_pred_enc))
+    if log_loss is not None:
+        metrics["log_loss"] = float(log_loss(y_val_enc, y_prob))
     logger.info(
-        "Train shape=%s val shape=%s, target distribution train=%s val=%s",
-        X_train.shape, X_val.shape,
-        dict(zip(*np.unique(y_train, return_counts=True))),
-        dict(zip(*np.unique(y_val, return_counts=True))),
+        "CatBoost val metrics: accuracy=%.4f log_loss=%.4f",
+        metrics["accuracy"] or 0.0, metrics["log_loss"] or 0.0,
     )
 
-    cat_idx = artifacts.cat_feature_indices
-    metrics: Dict[str, Dict[str, float]] = {}
-    models: Dict[str, Optional[object]] = {}
+    # Save model
+    model_path = Path(model_path)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save_model(str(model_path))
+    logger.info("Saved CatBoost model to %s", model_path)
 
-    # ---- 3. CatBoost ----------------------------------------------------
-    try:
-        cat_model = _train_catboost(
-            X_train, y_train, X_val, y_val,
-            cat_feature_indices=cat_idx,
-            random_seed=random_seed,
-        )
-        models["cat"] = cat_model
-        if accuracy_score is not None:
-            y_pred_int = cat_model.predict(X_val).astype(int).ravel()
-            y_prob = cat_model.predict_proba(X_val)
-            metrics["cat"] = {
-                "accuracy": float(accuracy_score(y_val, y_pred_int)),
-                "log_loss": float(log_loss(y_val, y_prob)) if log_loss is not None else None,
-            }
-            logger.info("CatBoost val accuracy=%.4f log_loss=%s",
-                        metrics["cat"]["accuracy"], metrics["cat"]["log_loss"])
-    except Exception as e:
-        logger.exception("CatBoost training failed: %s", e)
-        models["cat"] = None
+    # Save artifacts (label encoder classes + feature column order)
+    artifact_path = model_path.with_name(model_path.stem + "_artifacts.json")
+    artifacts = {
+        "schema_version": "v1",
+        "feature_cols": feature_cols,
+        "cat_cols": cat_cols,
+        "cat_feature_indices": cat_feature_indices,
+        "label_classes": [str(c) for c in le.classes_],
+        "metrics": metrics,
+        "model_path": str(model_path),
+        "feature_importance": {
+            name: float(imp) for name, imp in zip(feature_cols, model.get_feature_importance())
+        },
+    }
+    with open(artifact_path, "w", encoding="utf-8") as fh:
+        json.dump(artifacts, fh, indent=2)
+    logger.info("Saved artifacts to %s", artifact_path)
 
-    # ---- 4. LightGBM ----------------------------------------------------
-    try:
-        lgb_model = _train_lightgbm(
-            X_train, y_train, X_val, y_val,
-            cat_feature_indices=cat_idx,
-            random_seed=random_seed,
-        )
-        models["lgb"] = lgb_model
-        if accuracy_score is not None:
-            lgb_pred_probs = lgb_model.predict(X_val)
-            if lgb_pred_probs.ndim == 1:
-                lgb_pred_probs = lgb_pred_probs.reshape(-1, lgb_model.num_model_per_iteration() or 2)
-            lgb_pred_int = np.argmax(lgb_pred_probs, axis=1)
-            metrics["lgb"] = {
-                "accuracy": float(accuracy_score(y_val, lgb_pred_int)),
-                "log_loss": float(log_loss(y_val, lgb_pred_probs)) if log_loss is not None else None,
-            }
-            logger.info("LightGBM val accuracy=%.4f log_loss=%s",
-                        metrics["lgb"]["accuracy"], metrics["lgb"]["log_loss"])
-    except Exception as e:
-        logger.exception("LightGBM training failed: %s", e)
-        models["lgb"] = None
+    # Save a human-readable training report
+    report_path = model_path.with_name(model_path.stem + "_report.txt")
+    with open(report_path, "w", encoding="utf-8") as fh:
+        fh.write("Football prediction — CatBoost training report\n")
+        fh.write(f"Model path: {model_path}\n")
+        fh.write(f"Artifacts: {artifact_path}\n")
+        fh.write(f"Train rows: {len(X_train)}  Val rows: {len(X_val)}\n")
+        fh.write(f"Features ({len(feature_cols)}): {feature_cols}\n")
+        fh.write(f"Cat features ({len(cat_cols)}): {cat_cols}\n")
+        fh.write(f"Label classes: {list(le.classes_)}\n")
+        fh.write(f"Validation metrics: {metrics}\n")
+        if classification_report is not None:
+            fh.write("\nClassification report:\n")
+            fh.write(classification_report(
+                y_val_enc, y_pred_enc, target_names=list(le.classes_), zero_division=0
+            ))
+        fh.write("\nTop feature importances:\n")
+        sorted_imp = sorted(artifacts["feature_importance"].items(),
+                            key=lambda kv: kv[1], reverse=True)
+        for name, imp in sorted_imp[:25]:
+            fh.write(f"  {name:<32s} {imp:.4f}\n")
+    logger.info("Saved report to %s", report_path)
 
-    # ---- 5. XGBoost -----------------------------------------------------
-    try:
-        xgb_model = _train_xgboost(
-            X_train, y_train, X_val, y_val,
-            cat_feature_indices=cat_idx,
-            random_seed=random_seed,
-        )
-        models["xgb"] = xgb_model
-        if accuracy_score is not None:
-            import xgboost as xgb  # type: ignore
-            dval = xgb.DMatrix(X_val, feature_names=list(X_val.columns))
-            xgb_probs = xgb_model.predict(dval)
-            if xgb_probs.ndim == 1:
-                xgb_probs = xgb_probs.reshape(-1, int(getattr(xgb_model, "num_class", 3)))
-            xgb_pred_int = np.argmax(xgb_probs, axis=1)
-            metrics["xgb"] = {
-                "accuracy": float(accuracy_score(y_val, xgb_pred_int)),
-                "log_loss": float(log_loss(y_val, xgb_probs)) if log_loss is not None else None,
-            }
-            logger.info("XGBoost val accuracy=%.4f log_loss=%s",
-                        metrics["xgb"]["accuracy"], metrics["xgb"]["log_loss"])
-    except Exception as e:
-        logger.exception("XGBoost training failed: %s", e)
-        models["xgb"] = None
-
-    # ---- 6. Save everything --------------------------------------------
-    saved_paths = _save_models(models, model_dir)
-    artifacts.save(model_dir)
-
-    cfg = {"weights": weights}
-    with open(Path(model_dir) / "ensemble_weights.json", "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh)
+    # Save feature importance CSV
+    importance_path = model_path.with_name(model_path.stem + "_feature_importance.csv")
+    pd.DataFrame(
+        sorted(artifacts["feature_importance"].items(), key=lambda kv: kv[1], reverse=True),
+        columns=["feature", "importance"],
+    ).to_csv(importance_path, index=False)
+    logger.info("Saved feature importance to %s", importance_path)
 
     return {
-        "models": models,
+        "model_path": str(model_path),
+        "artifacts_path": str(artifact_path),
+        "report_path": str(report_path),
+        "importance_path": str(importance_path),
         "metrics": metrics,
-        "paths": saved_paths,
-        "weights": weights,
-        "feature_cols": list(artifacts.feature_names),
-        "artifacts": artifacts,
+        "feature_cols": feature_cols,
+        "cat_cols": cat_cols,
+        "label_classes": [str(c) for c in le.classes_],
+        "n_train": int(len(X_train)),
+        "n_val": int(len(X_val)),
     }
 
 
-def load_ensemble_models(model_dir: str = "models") -> Dict[str, object]:
-    """Load models and preprocessing artifacts from ``model_dir``."""
-    models = _load_models(Path(model_dir))
-    artifacts = EnsembleArtifacts.load(Path(model_dir))
-    return {"models": models, "artifacts": artifacts}
+# --------------------------------------------------------------------------- #
+# Predict                                                                     #
+# --------------------------------------------------------------------------- #
+def load_prediction_model(path: Union[str, Path] = DEFAULT_MODEL_PATH) -> CatBoostClassifier:
+    _require_catboost()
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Model not found at: {p}")
+    m = CatBoostClassifier()
+    m.load_model(str(p))
+    logger.info("Loaded CatBoost model from %s", p)
+    return m
 
 
-# ---------------------------------------------------------------------------
-# Prediction
-# ---------------------------------------------------------------------------
+def load_artifacts(path: Optional[Union[str, Path]] = None) -> Dict:
+    """Load the sidecar JSON describing feature columns, label classes, etc."""
+    if path is None:
+        path = Path(DEFAULT_MODEL_PATH).with_name(
+            Path(DEFAULT_MODEL_PATH).stem + "_artifacts.json"
+        )
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Artifacts not found at: {path}")
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
-def predict_ensemble(
-    models_or_bundle: Union[Dict[str, object], Dict],
-    feature_row_or_X: Union[pd.DataFrame, pd.Series, None] = None,
-    weights: Optional[Dict[str, float]] = None,
-    *,
-    artifacts: Optional[EnsembleArtifacts] = None,
-    model_dir: Optional[Union[str, Path]] = None,
-) -> Union[Dict, List[Dict]]:
-    """Predict probabilities using the trained ensemble.
+def prepare_match_features(
+    home_team: str,
+    away_team: str,
+    feature_data: pd.DataFrame,
+    model: Optional[CatBoostClassifier] = None,
+    artifacts: Optional[Dict] = None,
+) -> pd.DataFrame:
+    """Build a single-row feature DataFrame for a future match."""
+    if not isinstance(feature_data, pd.DataFrame):
+        raise ValueError("feature_data must be a pandas DataFrame")
+    if artifacts is None:
+        artifacts = load_artifacts()
+    feature_cols: List[str] = list(artifacts["feature_cols"])
+    cat_cols: List[str] = list(artifacts["cat_cols"])
 
-    Two calling styles are supported:
-
-    1. ``predict_ensemble(bundle, X)`` — pass the dict returned by
-       :func:`load_ensemble_models` (with ``models`` and ``artifacts`` keys),
-       plus a DataFrame of raw features (matching the columns of the input
-       dataset).
-    2. ``predict_ensemble(models_dict, X, artifacts=art)`` — pass the model
-       dict directly and provide the artifacts separately.
-
-    The input is always run through the same preprocessing layer used at
-    training time, which guarantees that:
-
-    * raw string columns (HTR, Time, Referee, ...) are dropped;
-    * categoricals are integer-encoded with the same mapping;
-    * the column order matches what the models were trained on.
-    """
-    # ---- Unpack arguments ----------------------------------------------
-    if isinstance(models_or_bundle, dict) and "models" in models_or_bundle and "artifacts" in models_or_bundle:
-        models = models_or_bundle["models"]
-        artifacts = models_or_bundle["artifacts"]
-    else:
-        models = models_or_bundle
-        if artifacts is None and model_dir is not None:
-            artifacts = EnsembleArtifacts.load(Path(model_dir))
-        if artifacts is None:
-            raise ValueError(
-                "predict_ensemble needs preprocessing artifacts. Pass them via "
-                "`artifacts=` or load them automatically by providing `model_dir`."
-            )
-
-    if weights is None:
-        weights = DEFAULT_WEIGHTS
-    total = float(sum(weights.values()))
-    if total <= 0:
-        raise ValueError("Ensemble weights must sum to a positive value")
-    weights = {k: float(v) / total for k, v in weights.items()}
-
-    # ---- Normalize input ------------------------------------------------
-    single_input = False
-    if feature_row_or_X is None:
-        raise ValueError("feature_row_or_X must be a pandas DataFrame or Series")
-    if isinstance(feature_row_or_X, pd.Series):
-        X_raw = feature_row_or_X.to_frame().T
-        single_input = True
-    elif isinstance(feature_row_or_X, pd.DataFrame):
-        X_raw = feature_row_or_X.copy()
-        if X_raw.shape[0] == 1:
-            single_input = True
-    else:
-        raise TypeError("feature_row_or_X must be a pandas DataFrame or Series")
-
-    # ---- Apply the same preprocessing used at training time -------------
-    X = transform(X_raw, artifacts)
-
-    # ---- Collect predictions from each model ---------------------------
-    prob_arrays: List[np.ndarray] = []
-    model_names: List[str] = []
-    canonical = list(CANONICAL_LABEL_ORDER)
-    label_to_idx = {lab: i for i, lab in enumerate(artifacts.label_classes)}
-
-    # CatBoost ------------------------------------------------------------
-    if models.get("cat") is not None:
-        try:
-            m = models["cat"]
-            p = np.asarray(m.predict_proba(X))
-            prob_arrays.append(p)
-            model_names.append("cat")
-        except Exception as e:
-            logger.exception("CatBoost predict failed: %s", e)
-
-    # LightGBM ------------------------------------------------------------
-    if models.get("lgb") is not None:
-        try:
-            import lightgbm as lgb  # type: ignore
-            m = models["lgb"]
-            p = np.asarray(m.predict(X))
-            if p.ndim == 1:
-                # Fallback: derive num_class from artifacts
-                p = p.reshape(-1, len(artifacts.label_classes))
-            prob_arrays.append(p)
-            model_names.append("lgb")
-        except Exception as e:
-            logger.exception("LightGBM predict failed: %s", e)
-
-    # XGBoost -------------------------------------------------------------
-    if models.get("xgb") is not None:
-        try:
-            import xgboost as xgb  # type: ignore
-            m = models["xgb"]
-            dmat = xgb.DMatrix(X, feature_names=list(X.columns))
-            p = np.asarray(m.predict(dmat))
-            if p.ndim == 1:
-                p = p.reshape(-1, len(artifacts.label_classes))
-            prob_arrays.append(p)
-            model_names.append("xgb")
-        except Exception as e:
-            logger.exception("XGBoost predict failed: %s", e)
-
-    if not prob_arrays:
-        raise RuntimeError("No model predictions available")
-
-    # ---- Align class order to CANONICAL_LABEL_ORDER ---------------------
-    aligned_probs: List[np.ndarray] = []
-    for arr in prob_arrays:
-        # If labels line up with the canonical order, just copy.
-        # Otherwise we re-order columns.
-        if arr.shape[1] == len(label_to_idx):
-            aligned = np.zeros((arr.shape[0], len(canonical)), dtype=float)
-            for lab, j in label_to_idx.items():
-                if lab in canonical:
-                    aligned[:, canonical.index(lab)] = arr[:, j]
-            aligned_probs.append(aligned)
+    # Defaults: numeric median, categorical UNK.
+    defaults: Dict[str, object] = {}
+    for c in feature_cols:
+        if c in cat_cols:
+            defaults[c] = "UNK"
+        elif c in feature_data.columns and pd.api.types.is_numeric_dtype(feature_data[c]):
+            defaults[c] = float(feature_data[c].median(skipna=True)) if feature_data[c].notna().any() else 0.0
         else:
-            # Defensive: pad / truncate
-            n = min(arr.shape[1], len(canonical))
-            aligned = np.zeros((arr.shape[0], len(canonical)), dtype=float)
-            aligned[:, :n] = arr[:, :n]
-            aligned_probs.append(aligned)
+            defaults[c] = 0.0
 
-    # ---- Weighted average ----------------------------------------------
-    n_rows = aligned_probs[0].shape[0]
-    avg = np.zeros((n_rows, len(canonical)), dtype=float)
-    for name, prob in zip(model_names, aligned_probs):
-        avg += weights.get(name, 0.0) * prob
+    # Most recent rows for each team.
+    home_recent = None
+    away_recent = None
+    if "HomeTeam" in feature_data.columns and "Date" in feature_data.columns:
+        h_mask = feature_data["HomeTeam"] == home_team
+        if h_mask.any():
+            home_recent = feature_data.loc[h_mask].sort_values("Date").iloc[-1]
+    if "AwayTeam" in feature_data.columns and "Date" in feature_data.columns:
+        a_mask = feature_data["AwayTeam"] == away_team
+        if a_mask.any():
+            away_recent = feature_data.loc[a_mask].sort_values("Date").iloc[-1]
 
-    row_sums = avg.sum(axis=1, keepdims=True)
-    row_sums[row_sums == 0] = 1.0
-    normalized = avg / row_sums
-    normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
-    row_sums = normalized.sum(axis=1, keepdims=True)
-    row_sums[row_sums == 0] = 1.0
-    normalized = normalized / row_sums
+    row: Dict[str, object] = {}
+    for c in feature_cols:
+        if c in cat_cols:
+            if c == "HomeTeam":
+                row[c] = str(home_team)
+            elif c == "AwayTeam":
+                row[c] = str(away_team)
+            elif c == "League" and home_recent is not None and c in home_recent.index:
+                row[c] = str(home_recent[c])
+            else:
+                row[c] = "UNK"
+        else:
+            value = None
+            if home_recent is not None and c in home_recent.index and pd.notna(home_recent[c]):
+                value = home_recent[c]
+            elif away_recent is not None and c in away_recent.index and pd.notna(away_recent[c]):
+                value = away_recent[c]
+            row[c] = value if value is not None else defaults[c]
 
-    # ---- Model agreement score -----------------------------------------
-    agreement = []
-    for i in range(n_rows):
-        top = []
-        for prob in aligned_probs:
-            top.append(canonical[int(np.argmax(prob[i]))])
-        if not top:
-            agreement.append(0.0)
-            continue
-        vals, counts = np.unique(top, return_counts=True)
-        agreement.append(float(counts.max()) / float(len(top)))
-
-    # ---- Final output ---------------------------------------------------
-    outputs: List[Dict[str, float]] = []
-    for i in range(n_rows):
-        outputs.append({
-            "home_win": float(normalized[i, canonical.index("H")]),
-            "draw": float(normalized[i, canonical.index("D")]),
-            "away_win": float(normalized[i, canonical.index("A")]),
-            "model_agreement_score": float(agreement[i]),
-        })
-
-    return outputs[0] if single_input else outputs
+    feat_row = pd.DataFrame([row], columns=feature_cols)
+    for c in cat_cols:
+        feat_row[c] = feat_row[c].astype(str)
+    return feat_row
 
 
-# Backwards-compatible alias
-def load_ensemble(model_dir: str = "models") -> Dict[str, Optional[object]]:
-    return load_ensemble_models(model_dir)
+def predict_match(
+    model: CatBoostClassifier,
+    feature_row: pd.DataFrame,
+    artifacts: Optional[Dict] = None,
+) -> Dict:
+    """Predict one match. Returns home_win / draw / away_win + confidence + risk."""
+    _require_catboost()
+    if not isinstance(feature_row, pd.DataFrame) or feature_row.shape[0] != 1:
+        raise ValueError("feature_row must be a single-row DataFrame")
+    if artifacts is None:
+        artifacts = load_artifacts()
+
+    feature_cols = list(artifacts["feature_cols"])
+    feature_row = feature_row[feature_cols]
+
+    probs = np.asarray(model.predict_proba(feature_row)).reshape(-1)
+    label_classes = list(artifacts["label_classes"])
+    mapping = {str(lbl): float(p) for lbl, p in zip(label_classes, probs)}
+
+    home_win = mapping.get("H", 0.0)
+    draw = mapping.get("D", 0.0)
+    away_win = mapping.get("A", 0.0)
+    s = home_win + draw + away_win
+    if s > 0:
+        home_win, draw, away_win = home_win / s, draw / s, away_win / s
+
+    max_p = max(home_win, draw, away_win)
+    p_vals = np.array([home_win, draw, away_win], dtype=float)
+    eps = 1e-12
+    entropy = -float(np.sum([p * np.log(max(p, eps)) for p in p_vals]))
+    max_entropy = float(np.log(3))
+    norm_entropy = entropy / max_entropy if max_entropy > 0 else 1.0
+    confidence = float(max(0.0, min(1.0, max_p * (1.0 - norm_entropy))))
+
+    if max_p >= 0.7 and norm_entropy < 0.4:
+        risk = "LOW"
+    elif max_p >= 0.5 and norm_entropy < 0.7:
+        risk = "MEDIUM"
+    else:
+        risk = "HIGH"
+
+    recommended = "H" if home_win >= max(draw, away_win) else ("D" if draw >= away_win else "A")
+
+    return {
+        "match": {
+            "home_team": str(feature_row["HomeTeam"].iloc[0]) if "HomeTeam" in feature_row.columns else "Unknown",
+            "away_team": str(feature_row["AwayTeam"].iloc[0]) if "AwayTeam" in feature_row.columns else "Unknown",
+        },
+        "main_result": {
+            "home_win": float(home_win),
+            "draw": float(draw),
+            "away_win": float(away_win),
+        },
+        "risk_level": risk,
+        "confidence_score": confidence,
+        "recommended_outcome": recommended,
+    }
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# End-to-end bootstrap                                                        #
+# --------------------------------------------------------------------------- #
+def bootstrap_and_train() -> Dict:
+    """One-shot: ensure data exists, train, save, reload, predict a sample.
+
+    Returns the dict from train_catboost, plus a sample_predictions list.
+    """
+    merged_path = ensure_data(MERGED_DATASET_PATH, raw_dir=RAW_DIR)
+    df = pd.read_csv(merged_path, parse_dates=["Date"])
+    logger.info("Loaded merged dataset: %d rows", len(df))
+
+    res = train_catboost(df)
+
+    # Reload from disk to prove the artifacts round-trip.
+    model = load_prediction_model(res["model_path"])
+    artifacts = load_artifacts(Path(res["model_path"]).with_name(
+        Path(res["model_path"]).stem + "_artifacts.json"
+    ))
+
+    # Predict on the last few rows as a smoke test.
+    sample = df.tail(5).reset_index(drop=True)
+    sample_features = build_features(sample)
+    preds = []
+    for _, row in sample.iterrows():
+        feat_row = prepare_match_features(
+            row["HomeTeam"], row["AwayTeam"],
+            sample_features, model=model, artifacts=artifacts
+        )
+        preds.append(predict_match(model, feat_row, artifacts=artifacts))
+    res["sample_predictions"] = preds
+    logger.info("Sample predictions on last 5 rows:")
+    for p in preds:
+        logger.info("  %s", p)
+    return res
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    merged_path = Path("data/processed/merged_dataset.csv")
-    if not merged_path.exists():
-        logger.error(
-            "Merged dataset not found at %s. Generate it first "
-            "(e.g. `python scripts/generate_sample_data.py`).",
-            merged_path,
-        )
-        raise SystemExit(1)
-    df = pd.read_csv(merged_path, parse_dates=["Date"])
-    logger.info("Loaded dataset with %d rows", len(df))
-
-    res = train_ensemble(df, model_dir="models")
-    logger.info("Ensemble training complete.")
-    logger.info("Metrics: %s", res["metrics"])
-    logger.info("Paths: %s", res["paths"])
-    logger.info("Feature columns (%d): %s",
-                len(res["feature_cols"]), res["feature_cols"])
-
-    # Demonstrate that prediction works after model reload
-    logger.info("Reloading models from disk to verify persistence...")
-    bundle = load_ensemble_models("models")
-    logger.info("Reloaded models and artifacts. Feature columns: %s",
-                bundle["artifacts"].feature_names)
-
-    # Use the last validation rows as a smoke test
-    sample = df.tail(5).reset_index(drop=True)
-    preds = predict_ensemble(bundle, sample)
-    logger.info("Sample predictions on last 5 rows: %s", preds)
+    bootstrap_and_train()
