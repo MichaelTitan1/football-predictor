@@ -27,7 +27,7 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#   Usually these files are written from a template
+#   Usually these files are written from a template for a PyInstaller build
 *.manifest
 *.spec
 
@@ -85,26 +85,26 @@ ipython_config.py
 #   For a library or package, check in .python-version if needed.
 
 # pipenv
-# Pipfile.lock
+#   Pipfile.lock
 
 # UV
-# uv.lock
+#   uv.lock
 
 # poetry
-# poetry.lock
-# poetry.toml
+#   poetry.lock
+#   poetry.toml
 
 # pdm
-# pdm.lock
-# pdm.toml
+#   pdm.lock
+#   pdm.toml
 .pdm-python
 .pdm-build/
 
 # pixi
-# pixi.lock
+#   pixi.lock
 .pixi
 
-# PEP 582
+# PEP 582; used by github.com/David-OConnor/pyflow and others
 __pypackages__/
 
 # Celery stuff
@@ -155,7 +155,7 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# pytype static analyzer
+# pytype
 .pytype/
 
 # Cython debug symbols
@@ -184,3 +184,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Fovra local canonical database
+data/processed/fovra_data.sqlite3
