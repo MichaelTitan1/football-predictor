@@ -36,68 +36,21 @@ class CanonicalPredictionService:
         self.artifact_hash = hashlib.sha256(Path(self.model_path).read_bytes()).hexdigest()
 
     def metadata(self) -> dict[str, Any]:
-        return {
-            "version": self.model_version,
-            "model_family": "catboost",
-            "artifact_path": self.model_path,
-            "artifact_sha256": self.artifact_hash,
-            "feature_schema_version": self.feature_schema_version,
-            "calibration_method": getattr(self.calibrator, "method", None),
-        }
+        return {"version": self.model_version, "model_family": "catboost", "artifact_path": self.model_path, "artifact_sha256": self.artifact_hash, "feature_schema_version": self.feature_schema_version, "calibration_method": getattr(self.calibrator, "method", None)}
 
     def predict(self, home_team: str, away_team: str) -> dict[str, Any]:
         row = prepare_match_features(home_team, away_team, self.feature_data, model=self.model)
         raw = np.asarray(self.model.predict_proba(row), dtype=float)
-        if raw.ndim != 2 or raw.shape[1] < 3:
-            raise RuntimeError("CatBoost model must return three 1X2 probabilities")
+        if raw.ndim != 2 or raw.shape[1] < 3: raise RuntimeError("CatBoost model must return three 1X2 probabilities")
         probs = raw[0, :3]
-        if self.calibrator is not None:
-            probs = self.calibrator.calibration.predict_proba(raw)[0, :3]
-        probs = np.clip(probs, 1e-8, 1.0)
-        probs = probs / probs.sum()
-        selected_index = int(np.argmax(probs))
-        selected = ["H", "D", "A"][selected_index]
-        confidence = float(probs[selected_index])
-        freshness = None
-        if "Date" in self.feature_data.columns:
-            freshness = str(self.feature_data["Date"].max())
-        return {
-            "home_team": home_team,
-            "away_team": away_team,
-            "probabilities": {"H": float(probs[0]), "D": float(probs[1]), "A": float(probs[2])},
-            "selected_prediction": selected,
-            "confidence": confidence,
-            "model_version": self.model_version,
-            "model_artifact_hash": self.artifact_hash,
-            "feature_schema_version": self.feature_schema_version,
-            "calibration_method": getattr(self.calibrator, "method", None),
-            "data_freshness_at": freshness,
-            "predicted_at": datetime.now(timezone.utc).isoformat(),
-        }
+        if self.calibrator is not None: probs = self.calibrator.calibration.predict_proba(raw)[0, :3]
+        probs = np.clip(probs, 1e-8, 1.0); probs = probs / probs.sum()
+        selected_index = int(np.argmax(probs)); selected = ["H", "D", "A"][selected_index]; confidence = float(probs[selected_index])
+        return {"home_team":home_team,"away_team":away_team,"probabilities":{"H":float(probs[0]),"D":float(probs[1]),"A":float(probs[2])},"selected_prediction":selected,"confidence":confidence,"model_version":self.model_version,"model_artifact_hash":self.artifact_hash,"feature_schema_version":self.feature_schema_version,"calibration_method":getattr(self.calibrator,"method",None),"data_freshness_at":str(self.feature_data["Date"].max()) if "Date" in self.feature_data.columns else None,"predicted_at":datetime.now(timezone.utc).isoformat()}
 
     def archive(self, match_canonical_key: str, result: dict[str, Any], store: SupabaseStore) -> None:
-        probs = result["probabilities"]
-        predicted_at = result["predicted_at"]
-        prediction_key = hashlib.sha256(f"{match_canonical_key}|{predicted_at}|{result['model_version']}".encode()).hexdigest()
-        archive_row = {
-            "prediction_key": prediction_key,
-            "match_canonical_key": match_canonical_key,
-            "predicted_at": predicted_at,
-            "model_version": result["model_version"],
-            "model_artifact_hash": result["model_artifact_hash"],
-            "home_probability": probs["H"],
-            "draw_probability": probs["D"],
-            "away_probability": probs["A"],
-            "selected_prediction": result["selected_prediction"],
-            "confidence": result["confidence"],
-        }
+        probs = result["probabilities"]; predicted_at=result["predicted_at"]
+        prediction_key=hashlib.sha256(f"{match_canonical_key}|{predicted_at}|{result['model_version']}".encode()).hexdigest()
+        archive_row={"prediction_key":prediction_key,"match_canonical_key":match_canonical_key,"predicted_at":predicted_at,"model_version":result["model_version"],"model_artifact_hash":result["model_artifact_hash"],"home_probability":probs["H"],"draw_probability":probs["D"],"away_probability":probs["A"],"selected_prediction":result["selected_prediction"],"confidence":result["confidence"]}
         store.upsert("prediction_archive", [archive_row], "prediction_key")
-        store.upsert(
-            "predictions",
-            [{
-                **archive_row,
-                "data_freshness_at": result.get("data_freshness_at"),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }],
-            "match_canonical_key",
-        )
+        store.upsert("predictions", [{"match_canonical_key":match_canonical_key,"predicted_at":predicted_at,"model_version":result["model_version"],"model_artifact_hash":result["model_artifact_hash"],"home_probability":probs["H"],"draw_probability":probs["D"],"away_probability":probs["A"],"selected_prediction":result["selected_prediction"],"confidence":result["confidence"],"data_freshness_at":result.get("data_freshness_at"),"updated_at":datetime.now(timezone.utc).isoformat()}], "match_canonical_key")
