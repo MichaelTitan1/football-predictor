@@ -27,6 +27,7 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
+#   Usually these files are written from a template
 *.manifest
 *.spec
 
@@ -34,7 +35,7 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit tests / coverage
+# Unit test / coverage reports
 htmlcov/
 .tox/
 .nox/
@@ -53,10 +54,77 @@ cover/
 *.mo
 *.pot
 
-# Framework / local databases
+# Django stuff:
+*.log
+local_settings.py
 db.sqlite3
 db.sqlite3-journal
-*.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+# .python-version
+
+# pipenv
+# Pipfile.lock
+
+# UV
+# uv.lock
+
+# poetry
+# poetry.lock
+# poetry.toml
+
+# pdm
+# pdm.lock
+# pdm.toml
+.pdm-python
+.pdm-build/
+
+# pixi
+# pixi.lock
+.pixi
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# Redis
+*.rdb
+*.aof
+*.pid
+
+# RabbitMQ
+mnesia/
+rabbitmq-data/
+
+# ActiveMQ
+activemq-data/
+
+# SageMath parsed files
+*.sage.py
 
 # Environments
 .env
@@ -68,18 +136,53 @@ ENV/
 env.bak/
 venv.bak/
 
-# Tool caches
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Pyre type checker
 .pyre/
+
+# pytype
 .pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+# .idea/
+
+# Abstra
+.abstra/
+
+# Visual Studio Code
+# .vscode/
+tempCodeRunnerFile.py
+
+# Ruff stuff
 .ruff_cache/
 
-# IDE / temporary files
-.idea/
-.vscode/
-tempCodeRunnerFile.py
+# PyPI configuration file
+.pypirc
+
+# Marimo
+marimo/_static/
+marimo/_lsp/
+__marimo__/
+
+# Streamlit
+.streamlit/secrets.toml
 
 # Fovra local canonical data store
 data/processed/fovra_data.sqlite3
