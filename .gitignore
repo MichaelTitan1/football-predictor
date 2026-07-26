@@ -27,7 +27,7 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#   Usually these files are written from a template
+#   Usually these files are written from a template for a PyInstaller build
 *.manifest
 *.spec
 
@@ -85,26 +85,37 @@ ipython_config.py
 #   For local projects, check in .python-version if needed.
 
 # pipenv
-#   Pipfile.lock
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+#   having no cross-platform support, this file may be included.
+# Pipfile.lock
 
 # UV
-#   uv.lock
+#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
+#   This is especially recommended for libraries.
+# uv.lock
 
 # poetry
-#   poetry.lock
-#   poetry.toml
+#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
+#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+# poetry.lock
+# poetry.toml
 
 # pdm
-#   pdm.lock
-#   pdm.toml
+#   pdm recommends including project-wide configuration in version control.
+#   https://pdm-project.org/en/latest/usage/project/#commit-your-pdm-lock-file-to-version-control
+# pdm.lock
+# pdm.toml
 .pdm-python
 .pdm-build/
 
 # pixi
-#   pixi.lock
+#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates a virtual environment.
+#   It is recommended not to include the .pixi directory in version control.
+# pixi.lock
 .pixi
 
-# PEP 582
+# PEP 582; used by github.com/David-OConnor/pyflow and others
 __pypackages__/
 
 # Celery stuff
@@ -162,16 +173,24 @@ dmypy.json
 cython_debug/
 
 # PyCharm
+#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+#   You can uncomment the .idea/ folder below if you prefer to include it.
 # .idea/
 
 # Abstra
+#   Ignore directories containing user credentials, local state, and settings.
 .abstra/
 
 # Visual Studio Code
+#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
+#   You can uncomment the .vscode/ folder below if you prefer to include it.
 # .vscode/
+# Temporary file for partial file execution
+# tempCodeRunnerFile.py
+
 tempCodeRunnerFile.py
 
-# Ruff stuff
+# Ruff stuff:
 .ruff_cache/
 
 # PyPI configuration file
