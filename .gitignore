@@ -33,7 +33,6 @@ htmlcov/
 .hypothesis/
 .mypy_cache/
 .pytype/
-.coverage.*
 *.log
 
 # Local environments / secrets
@@ -64,10 +63,9 @@ models/*.pkl
 .ipynb_checkpoints/
 .idea/
 .vscode/
-.pytest_cache/
 .ruff_cache/
 .abstra/
 .streamlit/secrets.toml
 
 # Temporary scripts
- tempCodeRunnerFile.py
+tempCodeRunnerFile.py
