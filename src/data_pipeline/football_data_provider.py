@@ -39,6 +39,12 @@ class FootballDataProvider:
         return f"{year % 100:02d}{(year + 1) % 100:02d}"
 
     @staticmethod
+    def _season_from_date(kickoff_utc: str) -> str:
+        dt = datetime.fromisoformat(kickoff_utc.replace("Z", "+00:00"))
+        start = dt.year if dt.month >= 7 else dt.year - 1
+        return f"{start}-{start + 1}"
+
+    @staticmethod
     def _team_key(name: str) -> str:
         value = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
         if not value:
@@ -56,8 +62,6 @@ class FootballDataProvider:
             parsed = pd.to_datetime(text, dayfirst=True, errors="raise")
         else:
             parsed = pd.to_datetime(f"{text} {str(raw_time).strip()}", dayfirst=True, errors="raise")
-        # Football-Data fixture times are UK-local. Use Europe/London when
-        # zoneinfo is available, otherwise retain an explicit UTC conversion.
         from zoneinfo import ZoneInfo
         parsed = parsed.replace(tzinfo=ZoneInfo("Europe/London"))
         return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -79,17 +83,26 @@ class FootballDataProvider:
         if not self.raw_dir.exists():
             return []
         frames: list[pd.DataFrame] = []
+        code_to_key = {info["code"]: key for key, info in LEAGUE_CONFIG.items()}
         for path in sorted(self.raw_dir.glob("*.csv")):
             try:
-                frames.append(pd.read_csv(path))
+                df = pd.read_csv(path)
+                if "League" not in df.columns:
+                    stem = path.stem.split("_")
+                    candidate = stem[0] if stem else ""
+                    if candidate in LEAGUE_CONFIG:
+                        df["League"] = candidate
+                    elif candidate in code_to_key:
+                        df["League"] = code_to_key[candidate]
+                frames.append(df)
             except Exception as exc:
                 logger.warning("Skipping unreadable raw file %s: %s", path, exc)
         return frames
 
     def _remote_frames(self) -> list[pd.DataFrame]:
         frames: list[pd.DataFrame] = []
-        current_year = datetime.now(timezone.utc).year
-        season_year = current_year if datetime.now(timezone.utc).month >= 7 else current_year - 1
+        now = datetime.now(timezone.utc)
+        season_year = now.year if now.month >= 7 else now.year - 1
 
         # Refresh the active season even if a stale copy already exists locally.
         for league_key, info in LEAGUE_CONFIG.items():
@@ -108,8 +121,7 @@ class FootballDataProvider:
         data = self._get(FIXTURES_URL)
         if data:
             try:
-                fixtures = self._read_csv_bytes(data)
-                frames.append(fixtures)
+                frames.append(self._read_csv_bytes(data))
             except Exception as exc:
                 logger.warning("Could not parse fixture feed: %s", exc)
         return frames
@@ -162,7 +174,7 @@ class FootballDataProvider:
                 match = MatchRecord(
                     provider=self.name,
                     league_key=league_key,
-                    season=None,
+                    season=self._season_from_date(kickoff),
                     kickoff_utc=kickoff,
                     home_team=home_key,
                     away_team=away_key,
@@ -177,7 +189,6 @@ class FootballDataProvider:
 
     def fetch(self) -> ProviderSnapshot:
         frames = self._local_frames()
-        local_count = len(frames)
         if self.include_remote:
             frames.extend(self._remote_frames())
         if not frames:
