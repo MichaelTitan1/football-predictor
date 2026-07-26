@@ -1,5 +1,5 @@
 -- Fovra V1 production data foundation.
--- Reuses existing leagues, teams, matches and prediction_archive tables.
+-- Reuses existing leagues, teams, matches, predictions and prediction_archive tables.
 -- The migration is additive: it does not create a second production database.
 
 create extension if not exists pgcrypto;
@@ -34,8 +34,23 @@ alter table public.matches add column if not exists first_seen_at timestamptz de
 alter table public.matches add column if not exists created_at timestamptz default now();
 alter table public.matches add column if not exists updated_at timestamptz default now();
 
+-- Current predictions table: latest/current state only. The archive below is the
+-- accountability ledger and should never be overwritten as a prediction snapshot.
+alter table public.predictions add column if not exists match_canonical_key text;
+alter table public.predictions add column if not exists predicted_at timestamptz;
+alter table public.predictions add column if not exists model_version text;
+alter table public.predictions add column if not exists model_artifact_hash text;
+alter table public.predictions add column if not exists home_probability numeric(8,7);
+alter table public.predictions add column if not exists draw_probability numeric(8,7);
+alter table public.predictions add column if not exists away_probability numeric(8,7);
+alter table public.predictions add column if not exists selected_prediction text;
+alter table public.predictions add column if not exists confidence numeric(8,7);
+alter table public.predictions add column if not exists data_freshness_at timestamptz;
+alter table public.predictions add column if not exists updated_at timestamptz default now();
+
 -- Prediction archive is the accountability record. Existing columns are preserved;
 -- these additions make the canonical V1 snapshot explicit.
+alter table public.prediction_archive add column if not exists prediction_key text;
 alter table public.prediction_archive add column if not exists match_canonical_key text;
 alter table public.prediction_archive add column if not exists predicted_at timestamptz;
 alter table public.prediction_archive add column if not exists model_version text;
@@ -102,6 +117,8 @@ create table if not exists public.model_versions (
 create unique index if not exists leagues_canonical_key_uq on public.leagues(canonical_key) where canonical_key is not null;
 create unique index if not exists teams_canonical_key_uq on public.teams(canonical_key) where canonical_key is not null;
 create unique index if not exists matches_canonical_key_uq on public.matches(canonical_key) where canonical_key is not null;
+create unique index if not exists predictions_match_uq on public.predictions(match_canonical_key) where match_canonical_key is not null;
+create unique index if not exists prediction_archive_key_uq on public.prediction_archive(prediction_key) where prediction_key is not null;
 create index if not exists matches_kickoff_status_idx on public.matches(kickoff_at, status);
 create index if not exists matches_league_kickoff_idx on public.matches(league_canonical_key, kickoff_at);
 create index if not exists matches_home_team_idx on public.matches(home_team_canonical_key, kickoff_at);
@@ -110,12 +127,10 @@ create index if not exists prediction_archive_match_idx on public.prediction_arc
 create index if not exists prediction_archive_resolved_idx on public.prediction_archive(resolved_at);
 create index if not exists ingestion_runs_provider_idx on public.ingestion_runs(provider_key, started_at desc);
 
--- Seed the provider registry without creating duplicate providers.
 insert into public.data_sources(provider_key, display_name, base_url, freshness_policy)
 values ('football-data.co.uk', 'Football-Data.co.uk', 'https://www.football-data.co.uk', 'periodic')
 on conflict (provider_key) do update set display_name = excluded.display_name, base_url = excluded.base_url, updated_at = now();
 
--- Updated-at maintenance for canonical tables.
 create or replace function public.fovra_set_updated_at()
 returns trigger language plpgsql as $$
 begin
@@ -130,9 +145,9 @@ drop trigger if exists teams_set_updated_at on public.teams;
 create trigger teams_set_updated_at before update on public.teams for each row execute function public.fovra_set_updated_at();
 drop trigger if exists matches_set_updated_at on public.matches;
 create trigger matches_set_updated_at before update on public.matches for each row execute function public.fovra_set_updated_at();
+drop trigger if exists predictions_set_updated_at on public.predictions;
+create trigger predictions_set_updated_at before update on public.predictions for each row execute function public.fovra_set_updated_at();
 
--- Prediction archive is append-only except for result resolution. This protects
--- the original prediction snapshot while allowing eventual outcome accountability.
 create or replace function public.fovra_protect_prediction_archive()
 returns trigger language plpgsql as $$
 begin
@@ -140,7 +155,8 @@ begin
     raise exception 'prediction_archive is append-only; rows cannot be deleted';
   end if;
   if tg_op = 'UPDATE' then
-    if new.match_canonical_key is distinct from old.match_canonical_key
+    if new.prediction_key is distinct from old.prediction_key
+       or new.match_canonical_key is distinct from old.match_canonical_key
        or new.predicted_at is distinct from old.predicted_at
        or new.model_version is distinct from old.model_version
        or new.model_artifact_hash is distinct from old.model_artifact_hash
@@ -160,12 +176,10 @@ $$;
 drop trigger if exists prediction_archive_immutable on public.prediction_archive;
 create trigger prediction_archive_immutable before update or delete on public.prediction_archive for each row execute function public.fovra_protect_prediction_archive();
 
--- RLS: public football information is readable; ingestion/model writes stay
--- server-side through the Supabase service key. The service role bypasses RLS.
--- Existing user-specific policies are not removed.
 alter table public.leagues enable row level security;
 alter table public.teams enable row level security;
 alter table public.matches enable row level security;
+alter table public.predictions enable row level security;
 alter table public.prediction_archive enable row level security;
 alter table public.data_sources enable row level security;
 alter table public.ingestion_runs enable row level security;
@@ -182,6 +196,9 @@ begin
   if not exists (select 1 from pg_policies where schemaname='public' and tablename='matches' and policyname='fovra_public_read_matches') then
     create policy fovra_public_read_matches on public.matches for select to anon, authenticated using (true);
   end if;
+  if not exists (select 1 from pg_policies where schemaname='public' and tablename='predictions' and policyname='fovra_public_read_predictions') then
+    create policy fovra_public_read_predictions on public.predictions for select to anon, authenticated using (true);
+  end if;
   if not exists (select 1 from pg_policies where schemaname='public' and tablename='prediction_archive' and policyname='fovra_public_read_archive') then
     create policy fovra_public_read_archive on public.prediction_archive for select to anon, authenticated using (true);
   end if;
@@ -193,8 +210,8 @@ begin
   end if;
 end $$;
 
--- Do not expose ingestion control-plane writes to browser roles.
 revoke insert, update, delete on public.data_sources from anon, authenticated;
 revoke insert, update, delete on public.ingestion_runs from anon, authenticated;
 revoke insert, update, delete on public.model_versions from anon, authenticated;
+revoke insert, update, delete on public.predictions from anon, authenticated;
 revoke insert, update, delete on public.prediction_archive from anon, authenticated;
