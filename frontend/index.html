@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fovra — Football Intelligence</title>
+  <meta name="description" content="Fovra explains football through data, statistics, and transparent predictions." />
+  <link rel="stylesheet" href="/app/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#home"><span class="brand-mark">F</span><span>Fovra</span></a>
+    <nav aria-label="Primary">
+      <a href="#home">Home</a><a href="#picks">Best Picks</a><a href="#upcoming">Upcoming</a><a href="#archive">Archive</a><a href="#leagues">Leagues</a>
+    </nav>
+  </header>
+  <main>
+    <section id="home" class="hero page-section">
+      <div>
+        <p class="eyebrow">FOOTBALL INTELLIGENCE</p>
+        <h1>Predictions built to be <em>checked.</em></h1>
+        <p class="lede">Fovra uses historical football data and a versioned CatBoost model to make transparent 1X2 predictions. No hype. No hidden reasoning. Just the data, the probability, and the record.</p>
+        <div class="hero-actions"><a class="button primary" href="#picks">Today's best picks</a><a class="button" href="#archive">View prediction archive</a></div>
+      </div>
+      <aside class="trust-card"><span class="label">DATA FRESHNESS</span><strong id="freshness">Checking…</strong><p id="freshness-detail">Fovra reports source freshness instead of presenting periodic data as live.</p></aside>
+    </section>
+
+    <section id="picks" class="page-section"><div class="section-head"><div><p class="eyebrow">TODAY</p><h2>Best Picks</h2></div><span class="muted">Primary 1X2 predictions only</span></div><div id="picks-grid" class="card-grid"></div></section>
+    <section id="upcoming" class="page-section"><div class="section-head"><div><p class="eyebrow">FIXTURES</p><h2>Upcoming Matches</h2></div></div><div id="upcoming-list" class="match-list"></div></section>
+    <section id="match" class="page-section"><div class="section-head"><div><p class="eyebrow">MATCH INTELLIGENCE</p><h2>Match Prediction</h2></div></div><div id="match-detail" class="detail-card empty">Choose a match from Upcoming Matches.</div></section>
+    <section id="archive" class="page-section"><div class="section-head"><div><p class="eyebrow">ACCOUNTABILITY</p><h2>Prediction Archive</h2></div><span class="muted">Predictions are retained and resolved when results arrive.</span></div><div id="archive-list" class="archive-list"></div></section>
+    <section id="teams" class="page-section"><div class="section-head"><div><p class="eyebrow">TEAM INTELLIGENCE</p><h2>Team Form</h2></div></div><div id="team-list" class="card-grid"></div></section>
+    <section id="h2h" class="page-section"><div class="section-head"><div><p class="eyebrow">HISTORY</p><h2>Head-to-Head</h2></div></div><div id="h2h-detail" class="detail-card empty">Select a match to inspect its recent head-to-head history.</div></section>
+    <section id="leagues" class="page-section"><div class="section-head"><div><p class="eyebrow">COMPETITIONS</p><h2>League Tables</h2></div></div><div id="league-list" class="card-grid"></div><div id="standings" class="table-wrap"></div></section>
+    <section id="fixtures" class="page-section"><div class="section-head"><div><p class="eyebrow">SCHEDULE</p><h2>Fixtures</h2></div></div><div id="fixtures-list" class="match-list"></div></section>
+  </main>
+  <footer><span>Fovra</span><span>Accuracy over quantity. Trust over marketing.</span></footer>
+  <script src="/app/app.js" defer></script>
+</body>
+</html>
