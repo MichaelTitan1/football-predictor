@@ -82,7 +82,7 @@ profile_default/
 ipython_config.py
 
 # pyenv
-# .python-version
+#   For a library or package, check in .python-version if needed.
 
 # pipenv
 # Pipfile.lock
@@ -118,6 +118,7 @@ celerybeat.pid
 
 # RabbitMQ
 mnesia/
+rabbitmq/
 rabbitmq-data/
 
 # ActiveMQ
@@ -154,7 +155,7 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# pytype
+# pytype static analyzer
 .pytype/
 
 # Cython debug symbols
@@ -183,6 +184,3 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-
-# Fovra local canonical data store
-data/processed/fovra_data.sqlite3
