@@ -123,6 +123,22 @@ def _time_split(df: pd.DataFrame, val_start_date: Optional[str] = None, time_gap
     return d.loc[train_mask].reset_index(drop=True), d.loc[val_mask].reset_index(drop=True)
 
 
+
+def _coerce_catboost_categoricals(X: pd.DataFrame, cat_cols: List[str]) -> pd.DataFrame:
+    """Return X with CatBoost categorical columns encoded as clean strings.
+
+    CatBoost rejects NaN/None values in columns declared via ``cat_features``.
+    Keeping this normalization in one place ensures training, validation, and
+    prediction all use identical categorical handling.
+    """
+    X = X.copy()
+    for c in cat_cols:
+        if c not in X.columns:
+            raise ValueError(f"Missing categorical feature column: {c}")
+        X[c] = X[c].astype(object).where(X[c].notna(), "UNK").astype(str)
+        X[c] = X[c].str.strip().replace({"": "UNK", "<NA>": "UNK", "nan": "UNK", "None": "UNK"})
+    return X
+
 def _build_xy(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, List[str], List[str]]:
     feats = build_features(df)
     if "FTR" not in feats.columns:
@@ -132,8 +148,7 @@ def _build_xy(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, List[str], Lis
     cat_cols = [c for c in FEATURE_SCHEMA["categorical"] if c in feats.columns]
     feature_cols = numeric_cols + cat_cols
     X = feats[feature_cols].copy()
-    for c in cat_cols:
-        X[c] = X[c].astype(object).where(X[c].notna(), "UNK").astype(str)
+    X = _coerce_catboost_categoricals(X, cat_cols)
     return X, y, feature_cols, cat_cols
 
 
@@ -166,10 +181,15 @@ def train_catboost(
     logger.info("LabelEncoder classes: %s", list(le.classes_))
 
     params = (cb_params or {}).copy()
+    verbose_env = os.getenv("FOVRA_CATBOOST_VERBOSE", "100").strip().lower()
+    verbose: Union[bool, int] = False if verbose_env in {"0", "false", "no"} else int(verbose_env)
     defaults = {
-        "iterations": 2000, "learning_rate": 0.03, "depth": 6,
+        "iterations": int(os.getenv("FOVRA_CATBOOST_ITERATIONS", "2000")),
+        "learning_rate": float(os.getenv("FOVRA_CATBOOST_LEARNING_RATE", "0.03")),
+        "depth": int(os.getenv("FOVRA_CATBOOST_DEPTH", "6")),
         "loss_function": "MultiClass", "eval_metric": "MultiClass",
-        "random_seed": random_seed, "od_type": "Iter", "od_wait": 50, "verbose": 100,
+        "random_seed": random_seed, "od_type": "Iter", "od_wait": 50,
+        "verbose": verbose,
     }
     for k, v in defaults.items():
         params.setdefault(k, v)
@@ -404,7 +424,8 @@ def predict_match(
         artifacts = load_artifacts()
 
     feature_cols = list(artifacts["feature_cols"])
-    feature_row = feature_row[feature_cols]
+    cat_cols = list(artifacts.get("cat_cols", []))
+    feature_row = _coerce_catboost_categoricals(feature_row[feature_cols], cat_cols)
 
     raw_probs = np.asarray(model.predict_proba(feature_row)).reshape(1, -1)[0]
     label_classes = list(artifacts["label_classes"])

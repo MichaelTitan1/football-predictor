@@ -1,176 +1,126 @@
-"""
-api/main.py
+"""Fovra V1 FastAPI API.
 
-FastAPI backend for the football prediction system (football-ai-system).
-
-Endpoints:
-- GET /health -> basic service and model status
-- POST /predict -> single match full prediction
-- POST /best-picks -> accept list of matches and return only high-confidence picks
-
-Design:
-- Loads model and feature dataset at startup and caches them on app.state
-- Uses modules: src.prediction.engine (core intelligence), src.prediction.filter_engine (filter),
-  data_loader.load_all_data, src.features.feature_engineer.build_features
-- Defensive error handling and logging
-- Structured JSON responses via Pydantic
-
-Run with:
-    uvicorn api.main:app --reload
-
+The API reads persisted canonical data and predictions from Supabase. It never
+fetches football data on frontend requests and never exposes the service key.
 """
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-# Local imports from package
-from data_loader import load_all_data
-from src.features.feature_engineer import build_features
-from src.prediction.engine import load_prediction_model, prepare_match_features, predict_match
-from src.prediction.filter_engine import filter_predictions
+from api.repository import FovraRepository
 
-logger = logging.getLogger("football_api")
-if not logger.handlers:
-    h = logging.StreamHandler()
-    h.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    logger.addHandler(h)
-logger.setLevel(logging.INFO)
-
-app = FastAPI(title="football-ai-system API", version="1.0")
+logger = logging.getLogger("fovra.api")
+app = FastAPI(title="Fovra Football Intelligence API", version="1.0.0")
+origins = [x.strip() for x in os.getenv("FOVRA_CORS_ORIGINS", "http://localhost:8000").split(",") if x.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False, allow_methods=["GET"], allow_headers=["*"])
+repo: FovraRepository | None = None
 
 
-MODEL_PATH = os.environ.get("FOOTBALL_MODEL_PATH", "models/football_model.cbm")
+def get_repo() -> FovraRepository:
+    global repo
+    if repo is None:
+        repo = FovraRepository()
+    return repo
 
 
-# Pydantic request/response models
-class MatchRequest(BaseModel):
-    home_team: str
-    away_team: str
-
-
-class BestPicksRequest(BaseModel):
-    matches: List[MatchRequest]
-
-
-class HealthResponse(BaseModel):
-    status: str
-    model_loaded: bool
-    model_path: Optional[str] = None
-    feature_rows: int
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Load model and feature dataset into app.state for reuse."""
-    logger.info("Starting football-ai-system API startup: loading data and model")
-
-    # Load raw data and build features (if available). Wrap in try/except to let service start even if data not present
+@app.get("/health")
+def health() -> dict[str, Any]:
     try:
-        raw = load_all_data()
-        features = build_features(raw)
-        app.state.feature_data = features
-        logger.info("Loaded feature_data with %d rows", len(features))
-    except Exception as e:
-        app.state.feature_data = None
-        logger.exception("Failed to load feature data at startup: %s", e)
-
-    # Load CatBoost model
-    try:
-        model = load_prediction_model(MODEL_PATH)
-        app.state.model = model
-        app.state.model_path = MODEL_PATH
-        logger.info("Loaded model from %s", MODEL_PATH)
-    except Exception as e:
-        app.state.model = None
-        app.state.model_path = None
-        logger.exception("Failed to load model at startup: %s", e)
+        return {"status": "ok", **get_repo().health()}
+    except Exception as exc:
+        logger.exception("health check failed")
+        return {"status": "degraded", "database": "unavailable", "error": str(exc)}
 
 
-@app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    """Return service health, whether model and feature data are loaded."""
-    model_loaded = app.state.model is not None
-    feature_rows = len(app.state.feature_data) if getattr(app.state, "feature_data", None) is not None else 0
-    status = "ok" if model_loaded and feature_rows > 0 else "degraded"
-    resp = HealthResponse(status=status, model_loaded=model_loaded, model_path=getattr(app.state, "model_path", None), feature_rows=feature_rows)
-    return resp
+@app.get("/api/v1/matches/today")
+def todays_matches(limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
+    return get_repo().matches_today(limit)
 
 
-@app.post("/predict")
-async def predict_endpoint(req: MatchRequest, request: Request) -> Dict[str, Any]:
-    """Produce full prediction markets for a single match.
-
-    Uses cached model and feature_data loaded at startup. Returns detailed markets produced by the core engine.
-    """
-    logger.info("/predict request from %s: %s vs %s", request.client.host if request.client else "unknown", req.home_team, req.away_team)
-
-    if app.state.model is None:
-        logger.error("Predict requested but model not loaded")
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
-    if app.state.feature_data is None:
-        logger.error("Predict requested but feature data not loaded")
-        raise HTTPException(status_code=503, detail="Feature data not loaded")
-
-    try:
-        # Prepare feature row (handles unknown teams safely)
-        feature_row = prepare_match_features(req.home_team, req.away_team, app.state.feature_data, model=app.state.model)
-        # Predict full markets
-        prediction = predict_match(app.state.model, feature_row, app.state.feature_data)
-        return prediction
-    except Exception as e:
-        logger.exception("Error during prediction: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/api/v1/matches/upcoming")
+def upcoming_matches(limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
+    return get_repo().upcoming(limit)
 
 
-@app.post("/best-picks")
-async def best_picks_endpoint(req: BestPicksRequest, request: Request) -> Dict[str, Any]:
-    """Return only high-confidence picks for a list of matches.
-
-    For each requested match, compute full prediction then filter with filter_engine.filter_predictions.
-    Returns a list of match-level best picks and an aggregated best_picks list.
-    """
-    logger.info("/best-picks request from %s: %d matches", request.client.host if request.client else "unknown", len(req.matches))
-
-    if app.state.model is None:
-        logger.error("Best-picks requested but model not loaded")
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
-    if app.state.feature_data is None:
-        logger.error("Best-picks requested but feature data not loaded")
-        raise HTTPException(status_code=503, detail="Feature data not loaded")
-
-    results = []
-    aggregated_picks = []
-
-    for m in req.matches:
-        try:
-            feature_row = prepare_match_features(m.home_team, m.away_team, app.state.feature_data, model=app.state.model)
-            prediction = predict_match(app.state.model, feature_row, app.state.feature_data)
-            # filter picks for this match
-            filtered = filter_predictions(prediction, high_threshold=0.70, medium_threshold=0.55, include_medium=False)
-            # attach filtered picks (may be empty)
-            results.append({"match": {"home_team": m.home_team, "away_team": m.away_team}, "best_picks": filtered.get("best_picks", [])})
-            # aggregate
-            for pick in filtered.get("best_picks", []):
-                aggregated_picks.append({"match": {"home_team": m.home_team, "away_team": m.away_team}, "market": pick["market"], "probability": pick["probability"], "confidence": pick["confidence"]})
-        except Exception as e:
-            logger.exception("Failed to compute best picks for %s vs %s: %s", m.home_team, m.away_team, e)
-            # include an error entry for this match
-            results.append({"match": {"home_team": m.home_team, "away_team": m.away_team}, "error": str(e)})
-
-    # Sort aggregated picks by probability desc
-    aggregated_picks = sorted(aggregated_picks, key=lambda x: x.get("probability", 0.0), reverse=True)
-
-    return {"results": results, "aggregated_best_picks": aggregated_picks}
+@app.get("/api/v1/matches/{canonical_key}")
+def match_details(canonical_key: str) -> dict[str, Any]:
+    match = get_repo().match(canonical_key)
+    if not match:
+        raise HTTPException(404, "Match not found")
+    prediction = get_repo().predictions(canonical_key, 1)
+    return {"match": match, "prediction": prediction[0] if prediction else None}
 
 
-# Basic root path
+@app.get("/api/v1/matches/{canonical_key}/prediction")
+def match_prediction(canonical_key: str) -> dict[str, Any]:
+    prediction = get_repo().predictions(canonical_key, 1)
+    if not prediction:
+        raise HTTPException(404, "No persisted prediction is available for this match")
+    return prediction[0]
+
+
+@app.get("/api/v1/predictions")
+def predictions(limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
+    return get_repo().predictions(limit=limit)
+
+
+@app.get("/api/v1/best-picks")
+def best_picks(limit: int = Query(20, ge=1, le=100)) -> list[dict[str, Any]]:
+    rows = get_repo().predictions(limit=200)
+    return sorted(rows, key=lambda x: float(x.get("confidence") or 0), reverse=True)[:limit]
+
+
+@app.get("/api/v1/prediction-archive")
+def prediction_archive(limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
+    return get_repo().archive(limit)
+
+
+@app.get("/api/v1/teams")
+def teams(league: str | None = None) -> list[dict[str, Any]]:
+    return get_repo().teams(league)
+
+
+@app.get("/api/v1/teams/{team_key}/form")
+def team_form(team_key: str, limit: int = Query(5, ge=1, le=20)) -> list[dict[str, Any]]:
+    return get_repo().team_matches(team_key, max(limit, 20))[:limit]
+
+
+@app.get("/api/v1/teams/{team_key}/h2h/{opponent_key}")
+def team_h2h(team_key: str, opponent_key: str, limit: int = Query(10, ge=1, le=50)) -> list[dict[str, Any]]:
+    return get_repo().h2h(team_key, opponent_key, limit)
+
+
+@app.get("/api/v1/leagues")
+def leagues() -> list[dict[str, Any]]:
+    return get_repo().leagues()
+
+
+@app.get("/api/v1/leagues/{league_key}/standings")
+def standings(league_key: str) -> list[dict[str, Any]]:
+    return get_repo().standings(league_key)
+
+
+@app.get("/api/v1/leagues/{league_key}/fixtures")
+def fixtures(league_key: str, limit: int = Query(100, ge=1, le=200)) -> list[dict[str, Any]]:
+    now = datetime.now(timezone.utc).isoformat()
+    return get_repo()._select("matches", params={"league_canonical_key": f"eq.{league_key}", "kickoff_at": f"gte.{now}", "order": "kickoff_at.asc", "limit": str(limit)})
+
+
+@app.get("/api/v1/data-freshness")
+def data_freshness() -> list[dict[str, Any]]:
+    return get_repo().freshness()
+
+
 @app.get("/")
-async def root() -> Dict[str, str]:
-    return {"message": "football-ai-system API - see /docs for usage"}
+def root() -> dict[str, str]:
+    return {"service": "fovra", "version": "1.0.0", "app": "/app/"}
+
+
+app.mount("/app", StaticFiles(directory="frontend", html=True), name="frontend")

@@ -37,78 +37,82 @@ MODEL_PATH = Path("models/football_model.cbm")
 HOME_TEAM = "Arsenal"
 AWAY_TEAM = "Chelsea"
 
-# Fail fast checks
-if not CLEAN_PATH.exists():
-    raise FileNotFoundError(f"Required dataset missing at {CLEAN_PATH}")
+def main() -> dict:
+    # Fail fast checks
+    if not CLEAN_PATH.exists():
+        raise FileNotFoundError(f"Required dataset missing at {CLEAN_PATH}")
 
-# Load clean dataset
-df = pd.read_csv(CLEAN_PATH, parse_dates=["Date"]) if CLEAN_PATH.exists() else None
-if df is None or df.empty:
-    raise RuntimeError(f"Clean dataset at {CLEAN_PATH} is empty or could not be loaded")
+    # Load clean dataset
+    df = pd.read_csv(CLEAN_PATH, parse_dates=["Date"]) if CLEAN_PATH.exists() else None
+    if df is None or df.empty:
+        raise RuntimeError(f"Clean dataset at {CLEAN_PATH} is empty or could not be loaded")
 
-# Basic schema validation
-required_cols = {"Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"}
-missing = required_cols - set(df.columns)
-if missing:
-    raise RuntimeError(f"Clean dataset is missing required columns: {missing}")
+    # Basic schema validation
+    required_cols = {"Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise RuntimeError(f"Clean dataset is missing required columns: {missing}")
 
-# Determine model: load or train
-model = None
-if MODEL_PATH.exists():
-    # Load real model from disk
-    model = load_prediction_model(str(MODEL_PATH))
-else:
-    # Train a real model from scratch using train_advanced_model
-    # This will raise if dependencies missing or training fails
-    train_res = train_advanced_model(df)
-    # Verify training produced a saved model file
-    mp = Path(train_res.get("model_path")) if isinstance(train_res, dict) else None
-    if mp is None or not mp.exists():
-        raise RuntimeError("Training completed but model file not found or not saved")
-    # Load the saved model from disk to ensure consistency
-    model = load_prediction_model(str(mp))
+    # Determine model: load or train
+    model = None
+    if MODEL_PATH.exists():
+        # Load real model from disk
+        model = load_prediction_model(str(MODEL_PATH))
+    else:
+        # Train a real model from scratch using train_advanced_model
+        # This will raise if dependencies missing or training fails
+        train_res = train_advanced_model(df)
+        # Verify training produced a saved model file
+        mp = Path(train_res.get("model_path")) if isinstance(train_res, dict) else None
+        if mp is None or not mp.exists():
+            raise RuntimeError("Training completed but model file not found or not saved")
+        # Load the saved model from disk to ensure consistency
+        model = load_prediction_model(str(mp))
 
-# Ensure model is present
-if model is None:
-    raise RuntimeError("Model not available after loading or training")
+    # Ensure model is present
+    if model is None:
+        raise RuntimeError("Model not available after loading or training")
 
-# Build advanced features (deterministic, no leakage)
-adv = build_advanced_features(df)
-if adv is None or adv.empty:
-    raise RuntimeError("Advanced feature engineering produced empty dataset")
+    # Build advanced features (deterministic, no leakage)
+    adv = build_advanced_features(df)
+    if adv is None or adv.empty:
+        raise RuntimeError("Advanced feature engineering produced empty dataset")
 
-# Prepare feature row using model and advanced features
-feature_row = prepare_match_features(HOME_TEAM, AWAY_TEAM, adv, model)
-if feature_row is None or not hasattr(feature_row, "shape") or feature_row.shape[0] != 1:
-    raise RuntimeError("prepare_match_features failed to produce a single-row feature vector")
+    # Prepare feature row using model and advanced features
+    feature_row = prepare_match_features(HOME_TEAM, AWAY_TEAM, adv, model)
+    if feature_row is None or not hasattr(feature_row, "shape") or feature_row.shape[0] != 1:
+        raise RuntimeError("prepare_match_features failed to produce a single-row feature vector")
 
-# Predict using real model and feature_row
-output = predict_match(model, feature_row, adv)
-if not isinstance(output, dict):
-    raise RuntimeError("predict_match did not return expected dict output")
+    # Predict using real model and feature_row
+    output = predict_match(model, feature_row, adv)
+    if not isinstance(output, dict):
+        raise RuntimeError("predict_match did not return expected dict output")
 
-# Extract required fields
-try:
-    main = output["main_result"]
-    home_win = float(main["home_win"]) if "home_win" in main else None
-    draw = float(main["draw"]) if "draw" in main else None
-    away_win = float(main["away_win"]) if "away_win" in main else None
-    confidence = float(output.get("confidence_score") if "confidence_score" in output else output.get("confidence", None))
-    risk = str(output.get("risk_level") if "risk_level" in output else output.get("risk", None))
-except Exception as e:
-    raise RuntimeError(f"Prediction output missing required fields: {e}")
+    # Extract required fields
+    try:
+        main = output["main_result"]
+        home_win = float(main["home_win"]) if "home_win" in main else None
+        draw = float(main["draw"]) if "draw" in main else None
+        away_win = float(main["away_win"]) if "away_win" in main else None
+        confidence = float(output.get("confidence_score") if "confidence_score" in output else output.get("confidence", None))
+        risk = str(output.get("risk_level") if "risk_level" in output else output.get("risk", None))
+    except Exception as e:
+        raise RuntimeError(f"Prediction output missing required fields: {e}")
 
-# Final strict validation: no None values allowed
-if any(v is None for v in (home_win, draw, away_win, confidence, risk)):
-    raise RuntimeError("Prediction contained None or missing values; aborting")
+    # Final strict validation: no None values allowed
+    if any(v is None for v in (home_win, draw, away_win, confidence, risk)):
+        raise RuntimeError("Prediction contained None or missing values; aborting")
 
-result = {
-    "home_win": home_win,
-    "draw": draw,
-    "away_win": away_win,
-    "confidence": confidence,
-    "risk": risk,
-}
+    result = {
+        "home_win": home_win,
+        "draw": draw,
+        "away_win": away_win,
+        "confidence": confidence,
+        "risk": risk,
+    }
 
-# Print exactly one JSON object to stdout
-print(json.dumps(result))
+    return result
+
+
+if __name__ == "__main__":
+    print(json.dumps(main()))

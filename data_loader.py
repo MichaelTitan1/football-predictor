@@ -56,7 +56,6 @@ _COLUMN_RENAMES: Dict[str, str] = {
     "match_date": "Date",
     "matchdate": "Date",
     "kickoff": "Date",
-    "time": "Date",
     # Home team
     "home": "HomeTeam",
     "home_team": "HomeTeam",
@@ -130,20 +129,40 @@ def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _combine_date_time_columns(df: pd.DataFrame) -> pd.Series:
+    """Return a date string series, preserving a separate Time column when present.
+
+    Football-Data CSVs commonly contain separate ``Date`` and ``Time`` columns.
+    ``Time`` must not be renamed to ``Date``; when it exists alongside ``Date``
+    we append valid kickoff times before parsing so downstream timestamps retain
+    the fixture time without corrupting date-only files.
+    """
+    date_values = df["Date"].astype("string").str.strip()
+    time_col = next((c for c in df.columns if _normalize_column_name(c) == "time"), None)
+    if time_col is None or time_col == "Date":
+        return date_values
+
+    time_values = df[time_col].astype("string").str.strip()
+    has_time = time_values.notna() & time_values.str.match(r"^\d{1,2}:\d{2}(:\d{2})?$", na=False)
+    combined = date_values.copy()
+    combined.loc[has_time] = date_values.loc[has_time] + " " + time_values.loc[has_time]
+    return combined
+
+
 def _attempt_parse_dates(series: pd.Series) -> pd.Series:
     """
     Parse a pandas Series of date-like strings into Timestamps.
 
     Strategy:
-    - Try to parse with infer_datetime_format and dayfirst=False
-    - If more than 20% are NaT, try dayfirst=True
+    - Try to parse Football-Data style dates with dayfirst=True
+    - If more than 20% are NaT, retry dayfirst=False for ISO/US-style feeds
     - Final result may still contain NaT for unparsable entries (they will be dropped later)
     """
-    parsed = pd.to_datetime(series, errors="coerce", infer_datetime_format=True, dayfirst=False)
+    parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
     nat_fraction = parsed.isna().mean()
     if nat_fraction > 0.2:
-        logger.debug("High NaT fraction (%.2f) with dayfirst=False; retrying with dayfirst=True", nat_fraction)
-        parsed_alt = pd.to_datetime(series, errors="coerce", infer_datetime_format=True, dayfirst=True)
+        logger.debug("High NaT fraction (%.2f) with dayfirst=True; retrying with dayfirst=False", nat_fraction)
+        parsed_alt = pd.to_datetime(series, errors="coerce", dayfirst=False)
         if parsed_alt.isna().mean() < nat_fraction:
             parsed = parsed_alt
     return parsed
@@ -194,8 +213,8 @@ def _clean_dataframe(df: pd.DataFrame, source_label: Optional[str] = None) -> pd
 
     initial_rows = len(df)
 
-    # Parse dates
-    df["Date"] = _attempt_parse_dates(df["Date"])
+    # Parse dates, preserving a separate Football-Data Time column when present.
+    df["Date"] = _attempt_parse_dates(_combine_date_time_columns(df))
 
     # Convert goal columns to numeric (coerce errors to NaN)
     df["FTHG"] = pd.to_numeric(df["FTHG"], errors="coerce").astype("Float64")
