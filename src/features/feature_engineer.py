@@ -251,10 +251,14 @@ def build_features(
         home_matches_prior = home_mask.cumsum().shift(1).fillna(0).astype(int)
         home_wins_prior = home_wins.cumsum().shift(1).fillna(0).astype(int)
         # avoid division by zero
-        with pd.option_context("mode.use_inf_as_na", True):
-                    historical_home_win_rate = (
+        historical_home_win_rate = (
             home_wins_prior / home_matches_prior.replace({0: pd.NA})
         ).astype(float)
+
+        historical_home_win_rate = historical_home_win_rate.replace(
+            [float("inf"), float("-inf")],
+            pd.NA
+        )
 
         historical_home_win_rate = historical_home_win_rate.replace(
             [float("inf"), float("-inf")],
