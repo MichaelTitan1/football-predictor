@@ -401,10 +401,15 @@ def build_features(
     # But we have away_draw_rate; compute away recent win rate (last_n_form) from long and pivot
     # For simplicity compute away_recent_win_rate from long like we did for home but extract as away_win_rate_last_N
 
-    # Extract away recent win rate: compute from long grouped data a draw_rate was computed; need win rate
+        # Extract away recent win rate: compute from long grouped data a draw_rate was computed; need win rate
     # We'll recompute a short per-team last_n_form win rate pivot for away side
     # For performance reuse columns in long
-    long_win_rate = long.groupby(["Team"]) ["win"].apply(
+
+    # Ensure Team column survives pandas groupby.apply
+    if "Team" not in long.columns:
+        long = long.reset_index()
+
+    long_win_rate = long.groupby("Team")["win"].apply(
         lambda s: s.shift(1).rolling(window=last_n_form, min_periods=1).mean()
     )
     # long_win_rate is aligned to long index
