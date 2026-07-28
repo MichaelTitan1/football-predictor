@@ -38,30 +38,58 @@ if not logger.handlers:
 logger.setLevel(logging.INFO)
 
 
-def _points_from_result(result: pd.Series, is_home: bool) -> pd.Series:
-    """Convert FTR result to points for team where is_home indicates perspective."""
-    # result: 'H', 'A', 'D'
-    # For home team: H -> 3, D -> 1, A -> 0
-    # For away team: A -> 3, D -> 1, H -> 0
-    r = result.fillna("")
-    if is_home:
-        return r.map({"H": 3, "D": 1, "A": 0}).astype("Int64")
-    else:
-        return r.map({"A": 3, "D": 1, "H": 0}).astype("Int64")
+def _points_from_result(result: pd.Series, is_home: pd.Series) -> pd.Series:
+    """Convert match result into points from each team's perspective."""
+
+    result = result.fillna("")
+    
+    points = pd.Series(0, index=result.index, dtype="Int64")
+
+    home_mask = is_home == True
+    away_mask = is_home == False
+
+    points.loc[home_mask] = (
+        result.loc[home_mask]
+        .map({"H": 3, "D": 1, "A": 0})
+        .fillna(0)
+    )
+
+    points.loc[away_mask] = (
+        result.loc[away_mask]
+        .map({"A": 3, "D": 1, "H": 0})
+        .fillna(0)
+    )
+
+    return points.astype("Int64")
 
 
-def _wl_draw_from_result(result: pd.Series, is_home: bool) -> pd.DataFrame:
-    """Return DataFrame with columns win, draw, loss (0/1) from perspective of team."""
-    r = result.fillna("")
-    if is_home:
-        win = (r == "H").astype(int)
-        draw = (r == "D").astype(int)
-        loss = (r == "A").astype(int)
-    else:
-        win = (r == "A").astype(int)
-        draw = (r == "D").astype(int)
-        loss = (r == "H").astype(int)
-    return pd.DataFrame({"win": win, "draw": draw, "loss": loss})
+def _wl_draw_from_result(result: pd.Series, is_home: pd.Series) -> pd.DataFrame:
+    """Return win/draw/loss from each team's perspective."""
+
+    result = result.fillna("")
+
+    home_mask = is_home == True
+    away_mask = is_home == False
+
+    win = pd.Series(0, index=result.index)
+    draw = pd.Series(0, index=result.index)
+    loss = pd.Series(0, index=result.index)
+
+    win.loc[home_mask] = (result.loc[home_mask] == "H").astype(int)
+    draw.loc[home_mask] = (result.loc[home_mask] == "D").astype(int)
+    loss.loc[home_mask] = (result.loc[home_mask] == "A").astype(int)
+
+    win.loc[away_mask] = (result.loc[away_mask] == "A").astype(int)
+    draw.loc[away_mask] = (result.loc[away_mask] == "D").astype(int)
+    loss.loc[away_mask] = (result.loc[away_mask] == "H").astype(int)
+
+    return pd.DataFrame(
+        {
+            "win": win,
+            "draw": draw,
+            "loss": loss,
+        }
+    )
 
 
 def _compute_streaks(flag_series: pd.Series) -> List[int]:
