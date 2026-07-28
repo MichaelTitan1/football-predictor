@@ -40,93 +40,72 @@ class SupabaseStore:
         self.upsert("teams",[{"canonical_key":f"{t.league_key}:{t.key}","league_canonical_key":t.league_key,"name":t.name,"source_provider":provider,"source_updated_at":fetched_at,"updated_at":now} for t in teams],"canonical_key")
         self.upsert("matches",[{"canonical_key":m.match_key,"league_canonical_key":m.league_key,"season":m.season,"kickoff_at":m.kickoff_utc,"status":m.status,"home_team_canonical_key":f"{m.league_key}:{m.home_team}","away_team_canonical_key":f"{m.league_key}:{m.away_team}","home_score":m.home_score,"away_score":m.away_score,"source_provider":provider,"source_match_id":m.source_id,"source_updated_at":fetched_at,"updated_at":now} for m in match_list],"canonical_key")
         return len(match_list)
-    def resolve_predictions(self, matches: Iterable[MatchRecord]) -> int:
-    """
-    Resolve only predictions that exist in prediction_archive.
+        def resolve_predictions(self, matches: Iterable[MatchRecord]) -> int:
+        """
+        Resolve only predictions that exist in prediction_archive.
+        """
 
-    Production optimization:
-    - avoids scanning every historical match
-    - avoids one Supabase request per match
-    - processes only matches with unresolved predictions
-    """
+        finished_matches = {
+            match.match_key: match
+            for match in matches
+            if match.status == "finished"
+            and match.home_score is not None
+            and match.away_score is not None
+        }
 
-    finished_matches = {
-        match.match_key: match
-        for match in matches
-        if match.status == "finished"
-        and match.home_score is not None
-        and match.away_score is not None
-    }
+        if not finished_matches:
+            return 0
 
-    if not finished_matches:
-        return 0
+        resolved = 0
 
-    resolved = 0
-
-    # Get unresolved predictions only once
-    rows = self._request(
-        "GET",
-        "prediction_archive",
-        params={
-            "is_correct": "is.null",
-            "select": "prediction_key,match_canonical_key,selected_prediction"
-        },
-    ) or []
-
-    if not rows:
-        return 0
-
-    updates = []
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    for row in rows:
-        match_key = row.get("match_canonical_key")
-
-        match = finished_matches.get(match_key)
-
-        if not match:
-            continue
-
-        actual = (
-            "H"
-            if match.home_score > match.away_score
-            else "A"
-            if match.away_score > match.home_score
-            else "D"
-        )
-
-        updates.append(
-            {
-                "prediction_key": row["prediction_key"],
-                "actual_result": actual,
-                "actual_home_score": match.home_score,
-                "actual_away_score": match.away_score,
-                "resolved_at": now,
-                "is_correct": row.get("selected_prediction") == actual,
-            }
-        )
-
-    # Apply updates
-    for update in updates:
-        self._request(
-            "PATCH",
+        rows = self._request(
+            "GET",
             "prediction_archive",
             params={
-                "prediction_key": f"eq.{update['prediction_key']}"
+                "is_correct": "is.null",
+                "select": "prediction_key,match_canonical_key,selected_prediction",
             },
-            payload={
-                "actual_result": update["actual_result"],
-                "actual_home_score": update["actual_home_score"],
-                "actual_away_score": update["actual_away_score"],
-                "resolved_at": update["resolved_at"],
-                "is_correct": update["is_correct"],
-            },
-        )
+        ) or []
 
-        resolved += 1
+        if not rows:
+            return 0
 
-    return resolved
+        now = datetime.now(timezone.utc).isoformat()
+
+        for row in rows:
+            match = finished_matches.get(
+                row.get("match_canonical_key")
+            )
+
+            if not match:
+                continue
+
+            actual = (
+                "H"
+                if match.home_score > match.away_score
+                else "A"
+                if match.away_score > match.home_score
+                else "D"
+            )
+
+            self._request(
+                "PATCH",
+                "prediction_archive",
+                params={
+                    "prediction_key": f"eq.{row['prediction_key']}"
+                },
+                payload={
+                    "actual_result": actual,
+                    "actual_home_score": match.home_score,
+                    "actual_away_score": match.away_score,
+                    "resolved_at": now,
+                    "is_correct": row.get("selected_prediction") == actual,
+                },
+            )
+
+            resolved += 1
+
+        return resolved
         resolved=0
         for match in matches:
             if match.status!="finished" or match.home_score is None or match.away_score is None: continue
