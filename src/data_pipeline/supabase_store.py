@@ -40,7 +40,7 @@ class SupabaseStore:
         self.upsert("teams",[{"canonical_key":f"{t.league_key}:{t.key}","league_canonical_key":t.league_key,"name":t.name,"source_provider":provider,"source_updated_at":fetched_at,"updated_at":now} for t in teams],"canonical_key")
         self.upsert("matches",[{"canonical_key":m.match_key,"league_canonical_key":m.league_key,"season":m.season,"kickoff_at":m.kickoff_utc,"status":m.status,"home_team_canonical_key":f"{m.league_key}:{m.home_team}","away_team_canonical_key":f"{m.league_key}:{m.away_team}","home_score":m.home_score,"away_score":m.away_score,"source_provider":provider,"source_match_id":m.source_id,"source_updated_at":fetched_at,"updated_at":now} for m in match_list],"canonical_key")
         return len(match_list)
-        def resolve_predictions(self, matches: Iterable[MatchRecord]) -> int:
+    def resolve_predictions(self, matches: Iterable[MatchRecord]) -> int:
         """
         Resolve only predictions that exist in prediction_archive.
         """
