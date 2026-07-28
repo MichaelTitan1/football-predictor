@@ -50,8 +50,7 @@ def run(*, offline: bool = False, sqlite_local: bool = False, db_path: str = "da
 
     logger.info("FOVRA: recording ingestion start")
     run_id = store.record_ingestion_start(snapshot.provider)
-
-       try:
+        try:
         logger.info("FOVRA: starting Supabase canonical upsert")
 
         upserted = store.upsert_snapshot(
@@ -69,16 +68,64 @@ def run(*, offline: bool = False, sqlite_local: bool = False, db_path: str = "da
         resolved = store.resolve_predictions(snapshot.matches)
 
         logger.info("FOVRA: resolved %s predictions", resolved)
-        store._request("PATCH","data_sources",params={"provider_key":f"eq.{snapshot.provider}"},payload={"last_attempt_at":datetime.now(timezone.utc).isoformat(),"last_success_at":datetime.now(timezone.utc).isoformat(),"last_data_at":snapshot.fetched_at,"last_success_rows":len(snapshot.matches),"last_error":None})
-        store.record_ingestion_finish(run_id,status="succeeded",records_seen=len(snapshot.matches),records_upserted=upserted,newest_match_at=newest)
-        return {"provider":snapshot.provider,"fetched_at":snapshot.fetched_at,"records_seen":len(snapshot.matches),"records_upserted":upserted,"prediction_results_resolved":resolved,"newest_match_at":newest,"storage":"supabase-postgresql","offline":offline}
+
+        store._request(
+            "PATCH",
+            "data_sources",
+            params={"provider_key": f"eq.{snapshot.provider}"},
+            payload={
+                "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                "last_success_at": datetime.now(timezone.utc).isoformat(),
+                "last_data_at": snapshot.fetched_at,
+                "last_success_rows": len(snapshot.matches),
+                "last_error": None,
+            },
+        )
+
+        store.record_ingestion_finish(
+            run_id,
+            status="succeeded",
+            records_seen=len(snapshot.matches),
+            records_upserted=upserted,
+            newest_match_at=newest,
+        )
+
+        return {
+            "provider": snapshot.provider,
+            "fetched_at": snapshot.fetched_at,
+            "records_seen": len(snapshot.matches),
+            "records_upserted": upserted,
+            "prediction_results_resolved": resolved,
+            "newest_match_at": newest,
+            "storage": "supabase-postgresql",
+            "offline": offline,
+        }
+
     except Exception as exc:
         try:
-            store.record_ingestion_finish(run_id,status="failed",records_seen=len(snapshot.matches),records_upserted=0,newest_match_at=newest,error_message=str(exc))
-            store._request("PATCH","data_sources",params={"provider_key":f"eq.{snapshot.provider}"},payload={"last_attempt_at":datetime.now(timezone.utc).isoformat(),"last_error":str(exc)[:2000]})
-        except Exception: logger.exception("Could not record ingestion failure metadata")
-        raise
+            store.record_ingestion_finish(
+                run_id,
+                status="failed",
+                records_seen=len(snapshot.matches),
+                records_upserted=0,
+                newest_match_at=newest,
+                error_message=str(exc),
+            )
 
+            store._request(
+                "PATCH",
+                "data_sources",
+                params={"provider_key": f"eq.{snapshot.provider}"},
+                payload={
+                    "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    "last_error": str(exc)[:2000],
+                },
+            )
+
+        except Exception:
+            logger.exception("Could not record ingestion failure metadata")
+
+        raise
 def main()->None:
     parser=argparse.ArgumentParser(description="Update Fovra's canonical football data store")
     parser.add_argument("--offline",action="store_true",help="Use existing data/raw CSVs; never fetch remote data")
