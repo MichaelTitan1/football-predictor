@@ -260,7 +260,7 @@ def build_features(
 
         # Teams with no previous home matches get default value 0
         historical_home_win_rate = historical_home_win_rate.fillna(0.0)
-        # Assign results back into group
+                # Assign results back into group
         group[f"rolling_points_last_{rolling_window_points}"] = rolling_pts.values
         group[f"last_{last_n_form}_matches_points"] = last_n_pts.values
         group[f"avg_goals_for_last_{rolling_window_goals}"] = avg_gf.values
@@ -270,13 +270,17 @@ def build_features(
         group[f"draw_rate_last_{last_n_form}"] = draw_rate.values
         group["historical_home_win_rate"] = historical_home_win_rate.values
 
-        # Keep Team column after groupby.apply
-        group["Team"] = group["Team"].astype(str)
-
         return group
 
 
     long = grouped.apply(_process_team).reset_index(drop=True)
+
+    # Restore Team column after pandas groupby.apply
+    if "Team" not in long.columns:
+        long["Team"] = pd.concat(
+            [g["Team"] for _, g in grouped],
+            ignore_index=True
+        )
 
     # Now extract features for home and away teams for each match and merge back to match-level
     # Split long back into home and away perspectives by IsHome
