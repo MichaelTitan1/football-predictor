@@ -111,14 +111,20 @@ create table if not exists public.model_versions (
     metadata jsonb not null default '{}'::jsonb,
     created_at timestamptz not null default now()
 );
-
--- Canonical uniqueness. Nullable legacy rows remain valid until they are
--- re-ingested; all new canonical records must have these keys.
-create unique index if not exists leagues_canonical_key_uq on public.leagues(canonical_key) where canonical_key is not null;
-create unique index if not exists teams_canonical_key_uq on public.teams(canonical_key) where canonical_key is not null;
-create unique index if not exists matches_canonical_key_uq on public.matches(canonical_key) where canonical_key is not null;
-create unique index if not exists predictions_match_uq on public.predictions(match_canonical_key) where match_canonical_key is not null;
-create unique index if not exists prediction_archive_key_uq on public.prediction_archive(prediction_key) where prediction_key is not null;
+-- Canonical uniqueness. PostgREST upserts use `on_conflict=<column>`,
+-- which requires a non-partial unique arbiter on the conflict column. PostgreSQL
+-- unique indexes still permit multiple NULL legacy rows, while enforcing
+-- uniqueness for every populated canonical key.
+drop index if exists public.leagues_canonical_key_uq;
+drop index if exists public.teams_canonical_key_uq;
+drop index if exists public.matches_canonical_key_uq;
+drop index if exists public.predictions_match_uq;
+drop index if exists public.prediction_archive_key_uq;
+create unique index leagues_canonical_key_uq on public.leagues(canonical_key);
+create unique index teams_canonical_key_uq on public.teams(canonical_key);
+create unique index matches_canonical_key_uq on public.matches(canonical_key);
+create unique index predictions_match_uq on public.predictions(match_canonical_key);
+create unique index prediction_archive_key_uq on public.prediction_archive(prediction_key);
 create index if not exists matches_kickoff_status_idx on public.matches(kickoff_at, status);
 create index if not exists matches_league_kickoff_idx on public.matches(league_canonical_key, kickoff_at);
 create index if not exists matches_home_team_idx on public.matches(home_team_canonical_key, kickoff_at);

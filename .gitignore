@@ -69,3 +69,7 @@ models/*.pkl
 
 # Temporary scripts
 tempCodeRunnerFile.py
+
+catboost_info/
+models/*
+!models/.gitkeep

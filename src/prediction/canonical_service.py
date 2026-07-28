@@ -47,6 +47,7 @@ class CanonicalPredictionService:
         probs = np.clip(probs, 1e-8, 1.0); probs = probs / probs.sum()
         selected_index = int(np.argmax(probs)); selected = ["H", "D", "A"][selected_index]; confidence = float(probs[selected_index])
         return {"home_team":home_team,"away_team":away_team,"probabilities":{"H":float(probs[0]),"D":float(probs[1]),"A":float(probs[2])},"selected_prediction":selected,"confidence":confidence,"model_version":self.model_version,"model_artifact_hash":self.artifact_hash,"feature_schema_version":self.feature_schema_version,"calibration_method":getattr(self.calibrator,"method",None),"data_freshness_at":str(self.feature_data["Date"].max()) if "Date" in self.feature_data.columns else None,"predicted_at":datetime.now(timezone.utc).isoformat()}
+      
 
     def archive(self, match_canonical_key: str, result: dict[str, Any], store: SupabaseStore) -> None:
         probs = result["probabilities"]; predicted_at=result["predicted_at"]

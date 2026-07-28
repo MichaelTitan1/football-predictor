@@ -181,10 +181,15 @@ def train_catboost(
     logger.info("LabelEncoder classes: %s", list(le.classes_))
 
     params = (cb_params or {}).copy()
+    verbose_env = os.getenv("FOVRA_CATBOOST_VERBOSE", "100").strip().lower()
+    verbose: Union[bool, int] = False if verbose_env in {"0", "false", "no"} else int(verbose_env)
     defaults = {
-        "iterations": 2000, "learning_rate": 0.03, "depth": 6,
+        "iterations": int(os.getenv("FOVRA_CATBOOST_ITERATIONS", "2000")),
+        "learning_rate": float(os.getenv("FOVRA_CATBOOST_LEARNING_RATE", "0.03")),
+        "depth": int(os.getenv("FOVRA_CATBOOST_DEPTH", "6")),
         "loss_function": "MultiClass", "eval_metric": "MultiClass",
-        "random_seed": random_seed, "od_type": "Iter", "od_wait": 50, "verbose": 100,
+        "random_seed": random_seed, "od_type": "Iter", "od_wait": 50,
+        "verbose": verbose,
     }
     for k, v in defaults.items():
         params.setdefault(k, v)
