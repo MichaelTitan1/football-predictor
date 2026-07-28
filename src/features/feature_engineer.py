@@ -246,25 +246,19 @@ def build_features(
         # cumulative sums for home matches
         home_matches_count = home_mask.cumsum()
         home_wins_cum = home_wins.cumsum()
-        # historical home win rate prior to current match: compute (home_wins_cum - curr_home_win)/ (home_matches_count - curr_is_home)
-        # Using shift to get prior counts
+        # historical home win rate prior to current match
+        # Using shift to get only previous home matches (no leakage)
+
         home_matches_prior = home_mask.cumsum().shift(1).fillna(0).astype(int)
         home_wins_prior = home_wins.cumsum().shift(1).fillna(0).astype(int)
-        # avoid division by zero
+
+                # Calculate win rate safely
         historical_home_win_rate = (
-            home_wins_prior / home_matches_prior.replace({0: pd.NA})
-        ).astype(float)
-
-        historical_home_win_rate = historical_home_win_rate.replace(
-            [float("inf"), float("-inf")],
-            pd.NA
+            home_wins_prior.astype(float)
+            .div(home_matches_prior.astype(float).replace(0, float("nan")))
         )
 
-        historical_home_win_rate = historical_home_win_rate.replace(
-            [float("inf"), float("-inf")],
-            pd.NA
-        )
-
+        # Teams with no previous home matches get default value 0
         historical_home_win_rate = historical_home_win_rate.fillna(0.0)
         # Assign results back into group
         group[f"rolling_points_last_{rolling_window_points}"] = rolling_pts.values
