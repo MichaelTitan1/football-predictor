@@ -51,8 +51,8 @@ def run(*, offline: bool = False, sqlite_local: bool = False, db_path: str = "da
     logger.info("FOVRA: recording ingestion start")
     run_id = store.record_ingestion_start(snapshot.provider)
 
-    try:
-                logger.info("FOVRA: starting Supabase canonical upsert")
+       try:
+        logger.info("FOVRA: starting Supabase canonical upsert")
 
         upserted = store.upsert_snapshot(
             snapshot.leagues,
@@ -62,12 +62,13 @@ def run(*, offline: bool = False, sqlite_local: bool = False, db_path: str = "da
             snapshot.fetched_at,
         )
 
-logger.info("FOVRA: Supabase upsert complete: %s records", upserted)
+        logger.info("FOVRA: Supabase upsert complete: %s records", upserted)
+
         logger.info("FOVRA: resolving finished predictions")
 
-resolved = store.resolve_predictions(snapshot.matches)
+        resolved = store.resolve_predictions(snapshot.matches)
 
-logger.info("FOVRA: resolved %s predictions", resolved)
+        logger.info("FOVRA: resolved %s predictions", resolved)
         store._request("PATCH","data_sources",params={"provider_key":f"eq.{snapshot.provider}"},payload={"last_attempt_at":datetime.now(timezone.utc).isoformat(),"last_success_at":datetime.now(timezone.utc).isoformat(),"last_data_at":snapshot.fetched_at,"last_success_rows":len(snapshot.matches),"last_error":None})
         store.record_ingestion_finish(run_id,status="succeeded",records_seen=len(snapshot.matches),records_upserted=upserted,newest_match_at=newest)
         return {"provider":snapshot.provider,"fetched_at":snapshot.fetched_at,"records_seen":len(snapshot.matches),"records_upserted":upserted,"prediction_results_resolved":resolved,"newest_match_at":newest,"storage":"supabase-postgresql","offline":offline}
