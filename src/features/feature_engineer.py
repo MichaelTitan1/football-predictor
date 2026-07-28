@@ -270,7 +270,11 @@ def build_features(
         group[f"draw_rate_last_{last_n_form}"] = draw_rate.values
         group["historical_home_win_rate"] = historical_home_win_rate.values
 
+        # Keep Team column after groupby.apply
+        group["Team"] = group["Team"].astype(str)
+
         return group
+
 
     long = grouped.apply(_process_team).reset_index(drop=True)
 
@@ -404,10 +408,6 @@ def build_features(
         # Extract away recent win rate: compute from long grouped data a draw_rate was computed; need win rate
     # We'll recompute a short per-team last_n_form win rate pivot for away side
     # For performance reuse columns in long
-
-    # Ensure Team column survives pandas groupby.apply
-    if "Team" not in long.columns:
-        long = long.reset_index()
 
     long_win_rate = long.groupby("Team")["win"].apply(
         lambda s: s.shift(1).rolling(window=last_n_form, min_periods=1).mean()
