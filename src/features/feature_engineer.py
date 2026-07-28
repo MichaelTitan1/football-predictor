@@ -252,11 +252,16 @@ def build_features(
         home_wins_prior = home_wins.cumsum().shift(1).fillna(0).astype(int)
         # avoid division by zero
         with pd.option_context("mode.use_inf_as_na", True):
-            historical_home_win_rate = (
-                home_wins_prior / home_matches_prior.replace({0: pd.NA})
-            ).astype(float)
-        historical_home_win_rate = historical_home_win_rate.fillna(0.0)
+                    historical_home_win_rate = (
+            home_wins_prior / home_matches_prior.replace({0: pd.NA})
+        ).astype(float)
 
+        historical_home_win_rate = historical_home_win_rate.replace(
+            [float("inf"), float("-inf")],
+            pd.NA
+        )
+
+        historical_home_win_rate = historical_home_win_rate.fillna(0.0)
         # Assign results back into group
         group[f"rolling_points_last_{rolling_window_points}"] = rolling_pts.values
         group[f"last_{last_n_form}_matches_points"] = last_n_pts.values
