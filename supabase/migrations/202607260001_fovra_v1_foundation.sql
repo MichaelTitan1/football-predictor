@@ -111,7 +111,6 @@ create table if not exists public.model_versions (
     metadata jsonb not null default '{}'::jsonb,
     created_at timestamptz not null default now()
 );
-
 -- Canonical uniqueness. PostgREST upserts use `on_conflict=<column>`,
 -- which requires a non-partial unique arbiter on the conflict column. PostgreSQL
 -- unique indexes still permit multiple NULL legacy rows, while enforcing

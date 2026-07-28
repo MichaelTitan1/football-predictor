@@ -16,9 +16,9 @@ from typing import Any
 import numpy as np
 
 from data_loader import load_all_data
-from src.features.preprocessing import build_features
+from src.features.feature_engineer import build_features
 from src.models.calibration import ConfidenceEstimator
-from src.models.ensemble_model import load_artifacts, load_prediction_model, prepare_match_features
+from src.prediction.engine import load_prediction_model, prepare_match_features
 from src.data_pipeline.supabase_store import SupabaseStore
 
 
@@ -29,7 +29,6 @@ class CanonicalPredictionService:
         self.model_version = os.getenv("FOOTBALL_MODEL_VERSION", "catboost-v1-existing")
         self.feature_schema_version = os.getenv("FOOTBALL_FEATURE_SCHEMA_VERSION", "leakage-safe-v1")
         self.model = load_prediction_model(self.model_path)
-        self.artifacts = load_artifacts(Path(self.model_path).with_name(Path(self.model_path).stem + "_artifacts.json"))
         self.feature_data = build_features(load_all_data())
         self.calibrator: ConfidenceEstimator | None = None
         if Path(self.calibration_path).exists():
@@ -40,20 +39,15 @@ class CanonicalPredictionService:
         return {"version": self.model_version, "model_family": "catboost", "artifact_path": self.model_path, "artifact_sha256": self.artifact_hash, "feature_schema_version": self.feature_schema_version, "calibration_method": getattr(self.calibrator, "method", None)}
 
     def predict(self, home_team: str, away_team: str) -> dict[str, Any]:
-        row = prepare_match_features(home_team, away_team, self.feature_data, model=self.model, artifacts=self.artifacts)
+        row = prepare_match_features(home_team, away_team, self.feature_data, model=self.model)
         raw = np.asarray(self.model.predict_proba(row), dtype=float)
         if raw.ndim != 2 or raw.shape[1] < 3: raise RuntimeError("CatBoost model must return three 1X2 probabilities")
-        probs = raw[0]
-        if self.calibrator is not None: probs = self.calibrator.calibration.predict_proba(raw)[0]
+        probs = raw[0, :3]
+        if self.calibrator is not None: probs = self.calibrator.calibration.predict_proba(raw)[0, :3]
         probs = np.clip(probs, 1e-8, 1.0); probs = probs / probs.sum()
-        labels = [str(label) for label in self.artifacts.get("label_classes", [])]
-        mapping = {label: float(prob) for label, prob in zip(labels, probs)}
-        hda = {label: mapping.get(label, 0.0) for label in ("H", "D", "A")}
-        total = sum(hda.values())
-        if total <= 0: raise RuntimeError("CatBoost model did not return H/D/A probabilities")
-        hda = {label: value / total for label, value in hda.items()}
-        selected = max(hda, key=hda.get); confidence = float(hda[selected])
-        return {"home_team":home_team,"away_team":away_team,"probabilities":{"H":float(hda["H"]),"D":float(hda["D"]),"A":float(hda["A"])},"selected_prediction":selected,"confidence":confidence,"model_version":self.model_version,"model_artifact_hash":self.artifact_hash,"feature_schema_version":self.feature_schema_version,"calibration_method":getattr(self.calibrator,"method",None),"data_freshness_at":str(self.feature_data["Date"].max()) if "Date" in self.feature_data.columns else None,"predicted_at":datetime.now(timezone.utc).isoformat()}
+        selected_index = int(np.argmax(probs)); selected = ["H", "D", "A"][selected_index]; confidence = float(probs[selected_index])
+        return {"home_team":home_team,"away_team":away_team,"probabilities":{"H":float(probs[0]),"D":float(probs[1]),"A":float(probs[2])},"selected_prediction":selected,"confidence":confidence,"model_version":self.model_version,"model_artifact_hash":self.artifact_hash,"feature_schema_version":self.feature_schema_version,"calibration_method":getattr(self.calibrator,"method",None),"data_freshness_at":str(self.feature_data["Date"].max()) if "Date" in self.feature_data.columns else None,"predicted_at":datetime.now(timezone.utc).isoformat()}
+      
 
     def archive(self, match_canonical_key: str, result: dict[str, Any], store: SupabaseStore) -> None:
         probs = result["probabilities"]; predicted_at=result["predicted_at"]

@@ -24,23 +24,51 @@ jobs:
           now = datetime.now(timezone.utc)
           current_season_start = now.year if now.month >= 7 else now.year - 1
           start_year = max(2019, current_season_start - 5)
-          result = download_all_leagues(start_year=start_year, end_year=current_season_start)
+          result = download_all_leagues(
+              start_year=start_year,
+              end_year=current_season_start
+          )
           downloaded = sum(len(years) for years in result.values())
-          print({"start_year": start_year, "end_year": current_season_start, "downloaded_files": downloaded, "result": result})
+          print({
+              "start_year": start_year,
+              "end_year": current_season_start,
+              "downloaded_files": downloaded,
+              "result": result
+          })
           if downloaded == 0:
-              raise SystemExit("No real Football-Data CSVs were downloaded; cannot train or predict safely.")
+              raise SystemExit(
+                  "No real Football-Data CSVs were downloaded; "
+                  "cannot train or predict safely."
+              )
           PY
+
       - name: Build merged historical dataset
         run: python -m src.data_pipeline.prepare_merged_dataset
+
       - name: Train CatBoost model from real historical data
         env:
           FOVRA_CATBOOST_ITERATIONS: "600"
           FOVRA_CATBOOST_VERBOSE: "100"
         run: python -m src.models.ensemble_model
+
       - name: Verify runtime model and data exist
         run: |
           test -f models/football_model.cbm
           test -d data/raw
+
+      - name: Ingest canonical football data
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python -m src.data_pipeline.update_canonical
+
+      - name: Generate persisted predictions
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          FOOTBALL_MODEL_PATH: models/football_model.cbm
+          FOOTBALL_CALIBRATION_PATH: models/football_model_confidence.joblib
+        run: python -m src.prediction.generate_predictions
       - name: Ingest canonical football data
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
