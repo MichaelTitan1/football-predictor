@@ -260,7 +260,7 @@ def build_features(
 
         # Teams with no previous home matches get default value 0
         historical_home_win_rate = historical_home_win_rate.fillna(0.0)
-        # Assign results back into group
+                # Assign results back into group
         group[f"rolling_points_last_{rolling_window_points}"] = rolling_pts.values
         group[f"last_{last_n_form}_matches_points"] = last_n_pts.values
         group[f"avg_goals_for_last_{rolling_window_goals}"] = avg_gf.values
@@ -273,6 +273,13 @@ def build_features(
         return group
 
     long = grouped.apply(_process_team).reset_index(level=0).reset_index(drop=True)
+
+    # Restore Team column after pandas groupby.apply
+    if "Team" not in long.columns:
+        long["Team"] = pd.concat(
+            [g["Team"] for _, g in grouped],
+            ignore_index=True
+        )
 
     # Now extract features for home and away teams for each match and merge back to match-level
     # Split long back into home and away perspectives by IsHome
@@ -401,10 +408,11 @@ def build_features(
     # But we have away_draw_rate; compute away recent win rate (last_n_form) from long and pivot
     # For simplicity compute away_recent_win_rate from long like we did for home but extract as away_win_rate_last_N
 
-    # Extract away recent win rate: compute from long grouped data a draw_rate was computed; need win rate
+        # Extract away recent win rate: compute from long grouped data a draw_rate was computed; need win rate
     # We'll recompute a short per-team last_n_form win rate pivot for away side
     # For performance reuse columns in long
-    long_win_rate = long.groupby(["Team"]) ["win"].apply(
+
+    long_win_rate = long.groupby("Team")["win"].apply(
         lambda s: s.shift(1).rolling(window=last_n_form, min_periods=1).mean()
     )
     # long_win_rate is aligned to long index
