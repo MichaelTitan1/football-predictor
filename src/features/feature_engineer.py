@@ -200,7 +200,7 @@ def build_features(
         long[k] = pd.NA
 
     # Group by team and compute features
-    grouped = long.groupby("Team", sort=False, group_keys=False)
+    grouped = long.groupby("Team", sort=False, group_keys=True)
 
     def _process_team(group: pd.DataFrame) -> pd.DataFrame:
         # Ensure group is sorted chronologically (should already be)
@@ -272,8 +272,7 @@ def build_features(
 
         return group
 
-
-    long = grouped.apply(_process_team).reset_index(drop=True)
+    long = grouped.apply(_process_team).reset_index(level=0).reset_index(drop=True)
 
     # Restore Team column after pandas groupby.apply
     if "Team" not in long.columns:

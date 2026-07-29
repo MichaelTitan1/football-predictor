@@ -5,6 +5,8 @@ used only by trusted backend/update jobs; browser clients never receive it.
 """
 from __future__ import annotations
 import os
+from dotenv import load_dotenv
+load_dotenv()
 from datetime import datetime, timezone
 from typing import Any, Iterable
 import requests
