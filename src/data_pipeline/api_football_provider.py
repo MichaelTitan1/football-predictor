@@ -29,6 +29,7 @@ class APIFootballProvider:
         self._league_by_api_id = api_football_id_map()
         self._cache: dict[tuple[str, tuple[tuple[str, Any], ...]], Any] = {}
         self.match_metadata: dict[str, dict[str, Any]] = {}
+        self.request_count = 0
 
     @staticmethod
     def _team_key(name: str) -> str:
@@ -41,6 +42,7 @@ class APIFootballProvider:
         cache_key = (path, tuple(sorted(params.items())))
         if cache_key in self._cache:
             return self._cache[cache_key]
+        self.request_count += 1
         response = requests.get(
             f"{API_BASE_URL}/{path.lstrip('/')}",
             headers={"x-apisports-key": self.api_key},
@@ -80,14 +82,26 @@ class APIFootballProvider:
         elif mode == "results":
             date_params = {"from": (today - timedelta(days=3)).isoformat(), "to": today.isoformat()}
 
-        for league in load_enabled_leagues():
-            params = {"league": league.api_football_id, "season": self.season, **date_params}
-            for item in self._get("fixtures", **params):
+        if mode == "results":
+            fixture_batches = []
+            for day in (today - timedelta(days=1), today):
+                fixture_batches.append(self._get("fixtures", date=day.isoformat()))
+        else:
+            fixture_batches = []
+            for league in load_enabled_leagues():
+                params = {"league": league.api_football_id, "season": self.season, **date_params}
+                fixture_batches.append(self._get("fixtures", **params))
+
+        for batch in fixture_batches:
+            for item in batch:
                 fixture = item.get("fixture", {})
                 api_league = item.get("league", {})
                 api_teams = item.get("teams", {})
                 goals = item.get("goals", {})
-                league_cfg = self._league_by_api_id.get(int(api_league.get("id", league.api_football_id)))
+                league_id = api_league.get("id")
+                if league_id is None:
+                    continue
+                league_cfg = self._league_by_api_id.get(int(league_id))
                 if not league_cfg:
                     continue
                 lk = league_cfg.key

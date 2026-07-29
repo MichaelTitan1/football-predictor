@@ -2,14 +2,11 @@ name: Fovra data update
 
 on:
   schedule:
-    # Daily historical refresh and fixture pull.
+    # Daily low-cost maintenance: check for new historical seasons only,
+    # refresh fixtures once, refresh ClubElo once, and refresh next-24h weather.
     - cron: '10 3 * * *'
-    # Results + standings every two hours.
-    - cron: '20 */2 * * *'
-    # Weather for next-24h fixtures every four hours.
-    - cron: '35 */4 * * *'
-    # Daily ClubElo refresh.
-    - cron: '45 4 * * *'
+    # API-Football results + standings every 8 hours: 3 runs/day.
+    - cron: '20 */8 * * *'
   workflow_dispatch:
     inputs:
       task:
@@ -17,7 +14,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, fixtures, results, weather, clubelo, historical]
+        options: [all, daily, results, fixtures, weather, clubelo, historical, bootstrap-historical]
 
 jobs:
   update:
@@ -35,33 +32,46 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "task=${{ inputs.task }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "10 3 * * *" ]; then
-            echo "task=fixtures" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "20 */2 * * *" ]; then
+          elif [ "${{ github.event.schedule }}" = "20 */8 * * *" ]; then
             echo "task=results" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "35 */4 * * *" ]; then
-            echo "task=weather" >> "$GITHUB_OUTPUT"
           else
-            echo "task=clubelo" >> "$GITHUB_OUTPUT"
+            echo "task=daily" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Refresh historical Football-Data training CSVs
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'historical' || steps.task.outputs.task == 'fixtures'
-        run: python -m src.data_pipeline.data_downloader
+      - name: Check for new Football-Data seasons only
+        id: historical
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'historical'
+        run: |
+          python -m src.data_pipeline.data_downloader | tee historical.json
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          payload = json.loads(Path('historical.json').read_text())
+          downloaded = int(payload.get('downloaded_files', 0))
+          print(f"downloaded_files={downloaded}")
+          print(f"changed={'true' if downloaded else 'false'}")
+          PY
+
+      - name: Initial historical bootstrap from 2010
+        id: bootstrap
+        if: steps.task.outputs.task == 'bootstrap-historical'
+        run: |
+          python -m src.data_pipeline.data_downloader --bootstrap | tee historical.json
+          echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Build merged historical dataset
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'historical' || steps.task.outputs.task == 'fixtures'
+        if: steps.historical.outputs.changed == 'true' || steps.bootstrap.outputs.changed == 'true'
         run: python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Train CatBoost model from real historical data
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'historical' || steps.task.outputs.task == 'fixtures'
+        if: steps.historical.outputs.changed == 'true' || steps.bootstrap.outputs.changed == 'true'
         env:
           FOVRA_CATBOOST_ITERATIONS: "600"
           FOVRA_CATBOOST_VERBOSE: "100"
         run: python -m src.models.ensemble_model
 
-      - name: Fetch API-Football fixtures
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'fixtures'
+      - name: Fetch API-Football fixtures once daily
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'fixtures'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -76,31 +86,23 @@ jobs:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: python -m src.data_pipeline.update_canonical --source api-football --mode results
 
-      - name: Refresh ClubElo
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo'
+      - name: Refresh ClubElo once daily
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'clubelo'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: |
-          python - <<'PY'
-          from src.data_pipeline.enrichment import refresh_clubelo
-          print(refresh_clubelo())
-          PY
+        run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
 
-      - name: Refresh MET Norway weather
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'weather'
+      - name: Refresh MET Norway weather for next-24h fixtures
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'weather'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           MET_NORWAY_USER_AGENT: ${{ vars.MET_NORWAY_USER_AGENT }}
-        run: |
-          python - <<'PY'
-          from src.data_pipeline.enrichment import refresh_weather
-          print(refresh_weather())
-          PY
+        run: python -c "from src.data_pipeline.enrichment import refresh_weather; print(refresh_weather())"
 
-      - name: Generate persisted CatBoost predictions after successful data update
-        if: steps.task.outputs.task != 'weather' && steps.task.outputs.task != 'clubelo'
+      - name: Generate persisted CatBoost predictions after football data updates
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'fixtures' || steps.task.outputs.task == 'results'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

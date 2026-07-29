@@ -195,6 +195,7 @@ def run(
             "records_upserted": upserted,
             "standings_upserted": standings_upserted,
             "venue_updates": venue_updates,
+            "api_football_requests": getattr(provider, "request_count", None),
             "prediction_results_resolved": resolved,
             "newest_match_at": newest,
             "storage": "supabase-postgresql",
