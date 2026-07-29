@@ -1,0 +1,124 @@
+{
+  "enabled_leagues": [
+    {
+      "key": "EPL",
+      "name": "Premier League",
+      "tier": 1,
+      "football_data_code": "E0",
+      "api_football_id": 39,
+      "country": "England"
+    },
+    {
+      "key": "Championship",
+      "name": "Championship",
+      "tier": 1,
+      "football_data_code": "E1",
+      "api_football_id": 40,
+      "country": "England"
+    },
+    {
+      "key": "LaLiga",
+      "name": "La Liga",
+      "tier": 1,
+      "football_data_code": "SP1",
+      "api_football_id": 140,
+      "country": "Spain"
+    },
+    {
+      "key": "Bundesliga",
+      "name": "Bundesliga",
+      "tier": 1,
+      "football_data_code": "D1",
+      "api_football_id": 78,
+      "country": "Germany"
+    },
+    {
+      "key": "SerieA",
+      "name": "Serie A",
+      "tier": 1,
+      "football_data_code": "I1",
+      "api_football_id": 135,
+      "country": "Italy"
+    },
+    {
+      "key": "Ligue1",
+      "name": "Ligue 1",
+      "tier": 1,
+      "football_data_code": "F1",
+      "api_football_id": 61,
+      "country": "France"
+    },
+    {
+      "key": "PrimeiraLiga",
+      "name": "Primeira Liga",
+      "tier": 1,
+      "football_data_code": "P1",
+      "api_football_id": 94,
+      "country": "Portugal"
+    },
+    {
+      "key": "Eredivisie",
+      "name": "Eredivisie",
+      "tier": 1,
+      "football_data_code": "N1",
+      "api_football_id": 88,
+      "country": "Netherlands"
+    },
+    {
+      "key": "BrasileiraoSerieA",
+      "name": "Brasileirão Série A",
+      "tier": 1,
+      "football_data_code": "BRA",
+      "api_football_id": 71,
+      "country": "Brazil"
+    },
+    {
+      "key": "BelgianProLeague",
+      "name": "Belgian Pro League",
+      "tier": 2,
+      "football_data_code": "B1",
+      "api_football_id": 144,
+      "country": "Belgium"
+    },
+    {
+      "key": "SuperLig",
+      "name": "Turkish Süper Lig",
+      "tier": 2,
+      "football_data_code": "T1",
+      "api_football_id": 203,
+      "country": "Turkey"
+    },
+    {
+      "key": "ScottishPremiership",
+      "name": "Scottish Premiership",
+      "tier": 2,
+      "football_data_code": "SC0",
+      "api_football_id": 179,
+      "country": "Scotland"
+    },
+    {
+      "key": "DanishSuperliga",
+      "name": "Danish Superliga",
+      "tier": 2,
+      "football_data_code": "DNK",
+      "api_football_id": 119,
+      "country": "Denmark"
+    },
+    {
+      "key": "Eliteserien",
+      "name": "Norwegian Eliteserien",
+      "tier": 2,
+      "football_data_code": "NOR",
+      "api_football_id": 103,
+      "country": "Norway"
+    },
+    {
+      "key": "Allsvenskan",
+      "name": "Swedish Allsvenskan",
+      "tier": 2,
+      "football_data_code": "SWE",
+      "api_football_id": 113,
+      "country": "Sweden"
+    }
+  ]
+}

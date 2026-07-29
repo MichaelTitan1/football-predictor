@@ -2,79 +2,107 @@ name: Fovra data update
 
 on:
   schedule:
-    - cron: '15 */6 * * *'
+    # Daily low-cost maintenance: check for new historical seasons only,
+    # refresh fixtures once, refresh ClubElo once, and refresh next-24h weather.
+    - cron: '10 3 * * *'
+    # API-Football results + standings every 8 hours: 3 runs/day.
+    - cron: '20 */8 * * *'
   workflow_dispatch:
+    inputs:
+      task:
+        description: Update task to run
+        required: true
+        default: all
+        type: choice
+        options: [all, daily, results, fixtures, weather, clubelo, historical, bootstrap-historical]
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Download real historical Football-Data CSVs
-        run: |
-          python - <<'PY'
-          from datetime import datetime, timezone
-          from src.data_pipeline.data_downloader import download_all_leagues
 
-          now = datetime.now(timezone.utc)
-          current_season_start = now.year if now.month >= 7 else now.year - 1
-          start_year = max(2019, current_season_start - 5)
-          result = download_all_leagues(
-              start_year=start_year,
-              end_year=current_season_start
-          )
-          downloaded = sum(len(years) for years in result.values())
-          print({
-              "start_year": start_year,
-              "end_year": current_season_start,
-              "downloaded_files": downloaded,
-              "result": result
-          })
-          if downloaded == 0:
-              raise SystemExit(
-                  "No real Football-Data CSVs were downloaded; "
-                  "cannot train or predict safely."
-              )
+      - name: Resolve scheduled task
+        id: task
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "task=${{ inputs.task }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "20 */8 * * *" ]; then
+            echo "task=results" >> "$GITHUB_OUTPUT"
+          else
+            echo "task=daily" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for new Football-Data seasons only
+        id: historical
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'historical'
+        run: |
+          python -m src.data_pipeline.data_downloader | tee historical.json
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          payload = json.loads(Path('historical.json').read_text())
+          downloaded = int(payload.get('downloaded_files', 0))
+          print(f"downloaded_files={downloaded}")
+          print(f"changed={'true' if downloaded else 'false'}")
           PY
 
+      - name: Initial historical bootstrap from 2010
+        id: bootstrap
+        if: steps.task.outputs.task == 'bootstrap-historical'
+        run: |
+          python -m src.data_pipeline.data_downloader --bootstrap | tee historical.json
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
       - name: Build merged historical dataset
+        if: steps.historical.outputs.changed == 'true' || steps.bootstrap.outputs.changed == 'true'
         run: python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Train CatBoost model from real historical data
+        if: steps.historical.outputs.changed == 'true' || steps.bootstrap.outputs.changed == 'true'
         env:
           FOVRA_CATBOOST_ITERATIONS: "600"
           FOVRA_CATBOOST_VERBOSE: "100"
         run: python -m src.models.ensemble_model
 
-      - name: Verify runtime model and data exist
-        run: |
-          test -f models/football_model.cbm
-          test -d data/raw
+      - name: Fetch API-Football fixtures once daily
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'fixtures'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: python -m src.data_pipeline.update_canonical --source api-football --mode fixtures
 
-      - name: Ingest canonical football data
+      - name: Fetch API-Football results and standings
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'results'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python -m src.data_pipeline.update_canonical
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: python -m src.data_pipeline.update_canonical --source api-football --mode results
 
-      - name: Generate persisted predictions
+      - name: Refresh ClubElo once daily
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'clubelo'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          FOOTBALL_MODEL_PATH: models/football_model.cbm
-          FOOTBALL_CALIBRATION_PATH: models/football_model_confidence.joblib
-        run: python -m src.prediction.generate_predictions
-      - name: Ingest canonical football data
+        run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
+
+      - name: Refresh MET Norway weather for next-24h fixtures
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'weather'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python -m src.data_pipeline.update_canonical
-      - name: Generate persisted predictions
+          MET_NORWAY_USER_AGENT: ${{ vars.MET_NORWAY_USER_AGENT }}
+        run: python -c "from src.data_pipeline.enrichment import refresh_weather; print(refresh_weather())"
+
+      - name: Generate persisted CatBoost predictions after football data updates
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'fixtures' || steps.task.outputs.task == 'results'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
