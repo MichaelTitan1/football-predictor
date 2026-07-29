@@ -30,18 +30,9 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-LEAGUE_CONFIG: Dict[str, Dict] = {
-    "EPL": {"name": "Premier League", "code": "E0", "tier": 1, "strength": 1.0},
-    "LaLiga": {"name": "La Liga", "code": "SP1", "tier": 1, "strength": 0.98},
-    "SerieA": {"name": "Serie A", "code": "I1", "tier": 1, "strength": 0.97},
-    "Bundesliga": {"name": "Bundesliga", "code": "D1", "tier": 1, "strength": 0.96},
-    "Ligue1": {"name": "Ligue 1", "code": "F1", "tier": 1, "strength": 0.94},
-    "PrimeiraLiga": {"name": "Primeira Liga", "code": "P1", "tier": 2, "strength": 0.86},
-    "Eredivisie": {"name": "Eredivisie", "code": "N1", "tier": 2, "strength": 0.85},
-    "BelgianPro": {"name": "Belgian Pro League", "code": "B1", "tier": 2, "strength": 0.84},
-    "SuperLig": {"name": "Süper Lig", "code": "T1", "tier": 2, "strength": 0.80},
-    "MLS": {"name": "MLS", "code": "M1", "tier": 2, "strength": 0.78},
-}
+from src.data_pipeline.league_config import league_config_map
+
+LEAGUE_CONFIG: Dict[str, Dict] = league_config_map()
 
 ALLOWED_LEAGUES = list(LEAGUE_CONFIG.keys())
 RAW_DIR = Path("data/raw")
@@ -176,7 +167,11 @@ def download_all_leagues(start_year: int = START_YEAR, end_year: Optional[int] =
 
 
 def update_latest_season() -> Dict[str, List[int]]:
-    """Download missing seasons and refresh the current season when present."""
+    """Download only seasons that are not already present locally.
+
+    This is the post-bootstrap path for permanent free deployments: existing
+    football-data.co.uk CSV files are never redownloaded or refreshed here.
+    """
     results: Dict[str, List[int]] = {}
     for league in ALLOWED_LEAGUES:
         existing_years = []
@@ -185,18 +180,32 @@ def update_latest_season() -> Dict[str, List[int]]:
                 existing_years.append(int(f.stem.split("_")[-1]))
             except ValueError:
                 continue
-        latest = max(existing_years) if existing_years else START_YEAR - 1
         newly_downloaded: List[int] = []
-        for year in range(latest + 1, CURRENT_YEAR + 1):
-            if download_season_data(league, year):
-                newly_downloaded.append(year)
-        if latest == CURRENT_YEAR and download_season_data(league, CURRENT_YEAR, force_refresh=True):
-            newly_downloaded.append(CURRENT_YEAR)
+        if not existing_years:
+            logger.info("No local baseline for %s; run --bootstrap during first setup before daily season checks.", league)
+            results[league] = newly_downloaded
+            continue
+        latest = max(existing_years)
+        next_season = latest + 1
+        if next_season <= CURRENT_YEAR and download_season_data(league, next_season):
+            newly_downloaded.append(next_season)
         results[league] = newly_downloaded
     return results
 
 
 if __name__ == "__main__":
+    import argparse
+    import json
+
     logging.basicConfig(level=logging.INFO)
-    logger.info("Starting conservative bulk download: %d -> %d", START_YEAR, CURRENT_YEAR)
-    logger.info("Download complete. Summary: %s", download_all_leagues(START_YEAR, CURRENT_YEAR))
+    parser = argparse.ArgumentParser(description="Manage football-data.co.uk historical CSV downloads")
+    parser.add_argument("--bootstrap", action="store_true", help="Initial setup only: download all configured leagues from 2010 to the current season")
+    args = parser.parse_args()
+
+    if args.bootstrap:
+        logger.info("Initial historical bootstrap: %d -> %d", START_YEAR, CURRENT_YEAR)
+        result = download_all_leagues(START_YEAR, CURRENT_YEAR)
+    else:
+        logger.info("Checking for missing/new football-data.co.uk seasons only")
+        result = update_latest_season()
+    print(json.dumps({"downloaded_files": sum(len(v) for v in result.values()), "result": result}, indent=2))

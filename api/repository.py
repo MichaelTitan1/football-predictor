@@ -67,6 +67,9 @@ class FovraRepository:
         return self._select("matches", params=params)
 
     def standings(self, league_key: str) -> list[dict[str, Any]]:
+        persisted = self._select("league_standings", params={"league_canonical_key": f"eq.{league_key}", "order": "rank.asc"})
+        if persisted:
+            return persisted
         matches = self._select("matches", params={"league_canonical_key": f"eq.{league_key}", "status": "eq.finished", "order": "kickoff_at.asc", "limit": "10000"})
         teams: dict[str, dict[str, Any]] = {}
         for m in matches:

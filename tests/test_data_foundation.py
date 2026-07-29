@@ -33,3 +33,64 @@ def test_provider_normalizes_result_statuses():
     ])
     _, _, matches = provider._normalize([frame])
     assert sorted(m.status for m in matches) == ["finished", "scheduled"]
+
+from src.data_pipeline.league_config import load_enabled_leagues, league_config_map
+
+
+def test_enabled_leagues_are_single_configured_v1_set():
+    leagues = load_enabled_leagues()
+    assert len(leagues) == 15
+    assert len({league.key for league in leagues}) == 15
+    assert all(league.football_data_code for league in leagues)
+    assert all(league.api_football_id for league in leagues)
+
+
+def test_downloader_uses_configured_leagues():
+    configured = league_config_map()
+    from src.data_pipeline import data_downloader
+    assert data_downloader.LEAGUE_CONFIG == configured
+    assert data_downloader.ALLOWED_LEAGUES == list(configured.keys())
+
+from src.data_pipeline.api_football_provider import APIFootballProvider
+
+
+class _FakeAPIFootballProvider(APIFootballProvider):
+    def __init__(self):
+        self.api_key = "test"
+        self.season = 2026
+        from src.data_pipeline.league_config import api_football_id_map
+        self._league_by_api_id = api_football_id_map()
+        self._cache = {}
+        self.match_metadata = {}
+        self.calls = []
+        self.request_count = 0
+
+    def _get(self, path, **params):
+        self.calls.append((path, params))
+        self.request_count += 1
+        return []
+
+
+def test_api_football_results_use_date_batches_not_per_league():
+    provider = _FakeAPIFootballProvider()
+    provider.fetch(mode="results")
+    assert len(provider.calls) == 2
+    assert all(path == "fixtures" for path, _ in provider.calls)
+    assert all("date" in params and "league" not in params for _, params in provider.calls)
+
+
+def test_api_football_fixture_refresh_is_once_per_configured_league():
+    provider = _FakeAPIFootballProvider()
+    provider.fetch(mode="fixtures")
+    assert len(provider.calls) == len(load_enabled_leagues())
+    assert all("league" in params for _, params in provider.calls)
+
+
+def test_latest_season_check_does_not_bootstrap_without_local_baseline(monkeypatch, tmp_path):
+    from src.data_pipeline import data_downloader
+    monkeypatch.setattr(data_downloader, "RAW_DIR", tmp_path)
+    called = []
+    monkeypatch.setattr(data_downloader, "download_season_data", lambda *args, **kwargs: called.append(args) or True)
+    result = data_downloader.update_latest_season()
+    assert sum(len(v) for v in result.values()) == 0
+    assert called == []
