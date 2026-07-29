@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 API_BASE_URL = os.getenv("API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io")
 REQUEST_TIMEOUT = 30
 
-
 class APIFootballProviderError(RuntimeError):
     def __init__(self, path: str, errors: Any):
         super().__init__(f"API-Football error for {path}: {errors}")
@@ -60,6 +59,7 @@ class APIFootballProvider:
         )
         response.raise_for_status()
         payload = response.json()
+        if payload.get("errors"):
         if payload.get("errors"):
             raise APIFootballProviderError(path, payload["errors"])
         data = payload.get("response", [])
@@ -167,15 +167,6 @@ class APIFootballProvider:
         return batches
 
     def fetch(self, mode: str = "fixtures") -> ProviderSnapshot:
-        leagues: dict[str, LeagueRecord] = {}
-        teams: dict[tuple[str, str], TeamRecord] = {}
-        matches: dict[str, MatchRecord] = {}
-        today = datetime.now(timezone.utc).date()
-        date_params: dict[str, str] = {}
-        if mode == "fixtures":
-            date_params = {"from": today.isoformat(), "to": (today + timedelta(days=14)).isoformat()}
-        elif mode == "results":
-            date_params = {"from": (today - timedelta(days=3)).isoformat(), "to": today.isoformat()}
 
         fixture_batches = []
         if mode == "results":
@@ -209,8 +200,13 @@ class APIFootballProvider:
                 kickoff = str(fixture.get("date"))
                 status = self._status(str(fixture.get("status", {}).get("short", "NS")))
                 match = MatchRecord(
-                    self.name, lk, self._season_label(season), kickoff,
-                    hk, ak, status,
+                    self.name,
+                    lk,
+                    self._season_label(season),
+                    kickoff,
+                    hk,
+                    ak,
+                    status,
                     goals.get("home") if status == "finished" else None,
                     goals.get("away") if status == "finished" else None,
                     str(fixture.get("id")),
@@ -222,7 +218,13 @@ class APIFootballProvider:
                     "venue_latitude": venue.get("lat"),
                     "venue_longitude": venue.get("lon"),
                 }
-        return ProviderSnapshot(tuple(leagues.values()), tuple(teams.values()), tuple(matches.values()), datetime.now(timezone.utc).isoformat(timespec="seconds"), self.name)
+        return ProviderSnapshot(
+            tuple(leagues.values()),
+            tuple(teams.values()),
+            tuple(matches.values()),
+            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            self.name,
+        )
 
     def fetch_standings(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
