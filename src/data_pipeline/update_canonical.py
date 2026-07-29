@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 
 from .canonical_data import connect, initialize, upsert_records
+from .api_football_provider import APIFootballProvider
 from .football_data_provider import FootballDataProvider
 from .supabase_store import SupabaseStore
 
@@ -29,15 +30,20 @@ def run(
     offline: bool = False,
     sqlite_local: bool = False,
     db_path: str = "data/processed/fovra_data.sqlite3",
+    source: str = "api-football",
+    mode: str = "fixtures",
 ) -> dict:
 
     logger.info("FOVRA: starting canonical ingestion")
 
-    provider = FootballDataProvider(include_remote=not offline)
-
-    logger.info("FOVRA: fetching Football-Data provider")
-
-    snapshot = provider.fetch()
+    if source == "football-data":
+        provider = FootballDataProvider(include_remote=not offline)
+        logger.info("FOVRA: fetching Football-Data historical provider")
+        snapshot = provider.fetch()
+    else:
+        provider = APIFootballProvider()
+        logger.info("FOVRA: fetching API-Football operational provider in %s mode", mode)
+        snapshot = provider.fetch(mode=mode)
 
     logger.info(
         "FOVRA: fetched %s matches, %s leagues, %s teams",
@@ -114,6 +120,19 @@ def run(
             upserted,
         )
 
+        venue_updates = 0
+        for canonical_key, metadata in getattr(provider, "match_metadata", {}).items():
+            clean = {k: v for k, v in metadata.items() if v is not None}
+            if clean:
+                store._request("PATCH", "matches", params={"canonical_key": f"eq.{canonical_key}"}, payload=clean)
+                venue_updates += 1
+
+        standings_upserted = 0
+        if source != "football-data" and mode in {"results", "standings"}:
+            rows = provider.fetch_standings()
+            store.upsert("league_standings", rows, "league_canonical_key,team_canonical_key,season")
+            standings_upserted = len(rows)
+
 
         logger.info(
             "FOVRA: resolving finished predictions"
@@ -174,6 +193,8 @@ def run(
             "fetched_at": snapshot.fetched_at,
             "records_seen": len(snapshot.matches),
             "records_upserted": upserted,
+            "standings_upserted": standings_upserted,
+            "venue_updates": venue_updates,
             "prediction_results_resolved": resolved,
             "newest_match_at": newest,
             "storage": "supabase-postgresql",
@@ -244,10 +265,9 @@ def main() -> None:
         help="Use SQLite only for local testing; never use in production",
     )
 
-    parser.add_argument(
-        "--db",
-        default="data/processed/fovra_data.sqlite3",
-    )
+    parser.add_argument("--db", default="data/processed/fovra_data.sqlite3")
+    parser.add_argument("--source", choices=["api-football", "football-data"], default="api-football")
+    parser.add_argument("--mode", choices=["fixtures", "results", "standings"], default="fixtures")
 
 
     args = parser.parse_args()
@@ -261,6 +281,8 @@ def main() -> None:
         offline=args.offline,
         sqlite_local=args.sqlite_local,
         db_path=args.db,
+        source=args.source,
+        mode=args.mode,
     )
 
 

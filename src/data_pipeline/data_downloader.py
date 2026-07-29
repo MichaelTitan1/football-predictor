@@ -30,18 +30,9 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-LEAGUE_CONFIG: Dict[str, Dict] = {
-    "EPL": {"name": "Premier League", "code": "E0", "tier": 1, "strength": 1.0},
-    "LaLiga": {"name": "La Liga", "code": "SP1", "tier": 1, "strength": 0.98},
-    "SerieA": {"name": "Serie A", "code": "I1", "tier": 1, "strength": 0.97},
-    "Bundesliga": {"name": "Bundesliga", "code": "D1", "tier": 1, "strength": 0.96},
-    "Ligue1": {"name": "Ligue 1", "code": "F1", "tier": 1, "strength": 0.94},
-    "PrimeiraLiga": {"name": "Primeira Liga", "code": "P1", "tier": 2, "strength": 0.86},
-    "Eredivisie": {"name": "Eredivisie", "code": "N1", "tier": 2, "strength": 0.85},
-    "BelgianPro": {"name": "Belgian Pro League", "code": "B1", "tier": 2, "strength": 0.84},
-    "SuperLig": {"name": "Süper Lig", "code": "T1", "tier": 2, "strength": 0.80},
-    "MLS": {"name": "MLS", "code": "M1", "tier": 2, "strength": 0.78},
-}
+from src.data_pipeline.league_config import league_config_map
+
+LEAGUE_CONFIG: Dict[str, Dict] = league_config_map()
 
 ALLOWED_LEAGUES = list(LEAGUE_CONFIG.keys())
 RAW_DIR = Path("data/raw")

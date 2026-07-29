@@ -33,3 +33,20 @@ def test_provider_normalizes_result_statuses():
     ])
     _, _, matches = provider._normalize([frame])
     assert sorted(m.status for m in matches) == ["finished", "scheduled"]
+
+from src.data_pipeline.league_config import load_enabled_leagues, league_config_map
+
+
+def test_enabled_leagues_are_single_configured_v1_set():
+    leagues = load_enabled_leagues()
+    assert len(leagues) == 15
+    assert len({league.key for league in leagues}) == 15
+    assert all(league.football_data_code for league in leagues)
+    assert all(league.api_football_id for league in leagues)
+
+
+def test_downloader_uses_configured_leagues():
+    configured = league_config_map()
+    from src.data_pipeline import data_downloader
+    assert data_downloader.LEAGUE_CONFIG == configured
+    assert data_downloader.ALLOWED_LEAGUES == list(configured.keys())
