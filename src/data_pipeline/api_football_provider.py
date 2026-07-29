@@ -10,12 +10,20 @@ from typing import Any
 import requests
 
 from .canonical_data import LeagueRecord, MatchRecord, TeamRecord
-from .league_config import api_football_id_map, load_enabled_leagues
+from .league_config import LeagueConfig, api_football_id_map, load_enabled_leagues
 from .providers import ProviderSnapshot
 
 logger = logging.getLogger(__name__)
 API_BASE_URL = os.getenv("API_FOOTBALL_BASE_URL", "https://v3.football.api-sports.io")
 REQUEST_TIMEOUT = 30
+
+
+class APIFootballProviderError(RuntimeError):
+    def __init__(self, path: str, errors: Any):
+        super().__init__(f"API-Football error for {path}: {errors}")
+        self.path = path
+        self.errors = errors
+
 
 class APIFootballProvider:
     name = "api-football"
@@ -24,10 +32,11 @@ class APIFootballProvider:
         self.api_key = api_key or os.getenv("API_FOOTBALL_KEY", "")
         if not self.api_key:
             raise RuntimeError("API_FOOTBALL_KEY is required for operational football updates")
-        now = datetime.now(timezone.utc)
-        self.season = season or (now.year if now.month >= 7 else now.year - 1)
+        self.preferred_season = season
         self._league_by_api_id = api_football_id_map()
         self._cache: dict[tuple[str, tuple[tuple[str, Any], ...]], Any] = {}
+        self._season_cache: dict[str, int] = {}
+        self._season_candidates_cache: dict[str, list[int]] = {}
         self.match_metadata: dict[str, dict[str, Any]] = {}
         self.request_count = 0
 
@@ -52,10 +61,52 @@ class APIFootballProvider:
         response.raise_for_status()
         payload = response.json()
         if payload.get("errors"):
-            raise RuntimeError(f"API-Football error for {path}: {payload['errors']}")
+            raise APIFootballProviderError(path, payload["errors"])
         data = payload.get("response", [])
         self._cache[cache_key] = data
         return data
+
+    @staticmethod
+    def _is_season_plan_error(exc: APIFootballProviderError) -> bool:
+        text = str(exc.errors).lower()
+        return "plan" in text and "season" in text
+
+    def _discover_season_candidates(self, league: LeagueConfig) -> list[int]:
+        if league.key in self._season_candidates_cache:
+            return self._season_candidates_cache[league.key]
+        seasons: list[int] = []
+        for row in self._get("leagues", id=league.api_football_id):
+            for season_info in row.get("seasons", []):
+                year = season_info.get("year")
+                coverage = season_info.get("coverage", {})
+                fixtures = coverage.get("fixtures", {}) if isinstance(coverage, dict) else {}
+                if isinstance(year, int) and fixtures:
+                    seasons.append(year)
+        seasons = sorted(set(seasons), reverse=True)
+        if self.preferred_season is not None:
+            seasons = [season for season in seasons if season <= self.preferred_season]
+        if not seasons:
+            raise RuntimeError(f"No API-Football seasons discovered for league {league.key}")
+        self._season_candidates_cache[league.key] = seasons
+        return seasons
+
+    def season_for_league(self, league: LeagueConfig) -> int:
+        if league.key not in self._season_cache:
+            season = self._discover_season_candidates(league)[0]
+            self._season_cache[league.key] = season
+            logger.info("League %s using season %s", league.key, season)
+        return self._season_cache[league.key]
+
+    def _mark_season_unavailable(self, league: LeagueConfig, season: int) -> int | None:
+        candidates = [candidate for candidate in self._discover_season_candidates(league) if candidate < season]
+        self._season_candidates_cache[league.key] = candidates
+        self._season_cache.pop(league.key, None)
+        if not candidates:
+            logger.warning("No API-Football free-plan season remains available for league %s", league.key)
+            return None
+        self._season_cache[league.key] = candidates[0]
+        logger.info("League %s using season %s", league.key, candidates[0])
+        return candidates[0]
 
     @staticmethod
     def _status(short: str) -> str:
@@ -71,6 +122,50 @@ class APIFootballProvider:
     def _season_label(season_start: int) -> str:
         return f"{season_start}-{season_start + 1}"
 
+    def _get_league_fixtures(self, league: LeagueConfig, **params: Any) -> list[dict[str, Any]]:
+        while True:
+            season = self.season_for_league(league)
+            try:
+                return self._get("fixtures", league=league.api_football_id, season=season, **params)
+            except APIFootballProviderError as exc:
+                if not self._is_season_plan_error(exc):
+                    raise
+                fallback = self._mark_season_unavailable(league, season)
+                if fallback is None:
+                    return []
+
+    def _get_standings(self, league: LeagueConfig) -> list[dict[str, Any]]:
+        while True:
+            season = self.season_for_league(league)
+            try:
+                return self._get("standings", league=league.api_football_id, season=season)
+            except APIFootballProviderError as exc:
+                if not self._is_season_plan_error(exc):
+                    raise
+                fallback = self._mark_season_unavailable(league, season)
+                if fallback is None:
+                    return []
+
+    def _get_results_fixture_batches(self, days: tuple[Any, ...]) -> list[list[dict[str, Any]]]:
+        batches: list[list[dict[str, Any]]] = []
+        pending = list(load_enabled_leagues())
+        while pending:
+            leagues_by_season: dict[int, list[LeagueConfig]] = {}
+            for league in pending:
+                leagues_by_season.setdefault(self.season_for_league(league), []).append(league)
+            pending = []
+            for season, leagues in leagues_by_season.items():
+                try:
+                    for day in days:
+                        batches.append(self._get("fixtures", season=season, date=day.isoformat()))
+                except APIFootballProviderError as exc:
+                    if not self._is_season_plan_error(exc):
+                        raise
+                    for league in leagues:
+                        if self._mark_season_unavailable(league, season) is not None:
+                            pending.append(league)
+        return batches
+
     def fetch(self, mode: str = "fixtures") -> ProviderSnapshot:
         leagues: dict[str, LeagueRecord] = {}
         teams: dict[tuple[str, str], TeamRecord] = {}
@@ -82,15 +177,12 @@ class APIFootballProvider:
         elif mode == "results":
             date_params = {"from": (today - timedelta(days=3)).isoformat(), "to": today.isoformat()}
 
+        fixture_batches = []
         if mode == "results":
-            fixture_batches = []
-            for day in (today - timedelta(days=1), today):
-                fixture_batches.append(self._get("fixtures", date=day.isoformat()))
+            fixture_batches = self._get_results_fixture_batches((today - timedelta(days=1), today))
         else:
-            fixture_batches = []
             for league in load_enabled_leagues():
-                params = {"league": league.api_football_id, "season": self.season, **date_params}
-                fixture_batches.append(self._get("fixtures", **params))
+                fixture_batches.append(self._get_league_fixtures(league, **date_params))
 
         for batch in fixture_batches:
             for item in batch:
@@ -113,10 +205,11 @@ class APIFootballProvider:
                 leagues[lk] = LeagueRecord(lk, league_cfg.name, league_cfg.country)
                 teams[(lk, hk)] = TeamRecord(hk, home_name, lk)
                 teams[(lk, ak)] = TeamRecord(ak, away_name, lk)
+                season = int(api_league.get("season") or self.season_for_league(league_cfg))
                 kickoff = str(fixture.get("date"))
                 status = self._status(str(fixture.get("status", {}).get("short", "NS")))
                 match = MatchRecord(
-                    self.name, lk, self._season_label(int(api_league.get("season", self.season))), kickoff,
+                    self.name, lk, self._season_label(season), kickoff,
                     hk, ak, status,
                     goals.get("home") if status == "finished" else None,
                     goals.get("away") if status == "finished" else None,
@@ -134,13 +227,14 @@ class APIFootballProvider:
     def fetch_standings(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for league in load_enabled_leagues():
-            for block in self._get("standings", league=league.api_football_id, season=self.season):
+            for block in self._get_standings(league):
+                season = self.season_for_league(league)
                 for standing in block.get("league", {}).get("standings", [[]])[0]:
                     team = standing.get("team", {})
                     rows.append({
                         "league_canonical_key": league.key,
                         "team_canonical_key": f"{league.key}:{self._team_key(str(team.get('name', '')))}",
-                        "season": str(self.season),
+                        "season": str(season),
                         "rank": standing.get("rank"),
                         "points": standing.get("points"),
                         "played": standing.get("all", {}).get("played"),
