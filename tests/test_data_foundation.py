@@ -2,10 +2,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from __future__ import annotations
-
-import pandas as pd
-
 from src.data_pipeline.canonical_data import (
     LeagueRecord,
     MatchRecord,
