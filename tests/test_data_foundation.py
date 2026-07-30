@@ -157,6 +157,28 @@ def test_api_football_fixture_refresh_is_once_per_configured_league():
     assert all("league" in params and "season" in params for _, params in fixture_calls)
 
 
+def test_api_football_fixture_refresh_can_run_in_league_batches(monkeypatch):
+    monkeypatch.setenv("FOVRA_API_FOOTBALL_BATCH_TOTAL", "3")
+    monkeypatch.setenv("FOVRA_API_FOOTBALL_BATCH_INDEX", "1")
+    provider = _FakeAPIFootballProvider()
+    provider.fetch(mode="fixtures")
+    fixture_calls = [(path, params) for path, params in provider.calls if path == "fixtures"]
+    expected_leagues = load_enabled_leagues()[1::3]
+    assert len(fixture_calls) == len(expected_leagues)
+    assert [params["league"] for _, params in fixture_calls] == [league.api_football_id for league in expected_leagues]
+
+
+def test_api_football_standings_can_run_in_league_batches(monkeypatch):
+    monkeypatch.setenv("FOVRA_API_FOOTBALL_BATCH_TOTAL", "3")
+    monkeypatch.setenv("FOVRA_API_FOOTBALL_BATCH_INDEX", "2")
+    provider = _FakeAPIFootballProvider()
+    provider.fetch_standings()
+    standings_calls = [(path, params) for path, params in provider.calls if path == "standings"]
+    expected_leagues = load_enabled_leagues()[2::3]
+    assert len(standings_calls) == len(expected_leagues)
+    assert [params["league"] for _, params in standings_calls] == [league.api_football_id for league in expected_leagues]
+
+
 def test_latest_season_check_does_not_bootstrap_without_local_baseline(monkeypatch, tmp_path):
     from src.data_pipeline import data_downloader
 

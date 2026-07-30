@@ -152,6 +152,40 @@ class APIFootballProvider:
                 if fallback is None:
                     return []
 
+    @staticmethod
+    def _batch_index(total: int, rotation: str) -> int:
+        now = datetime.now(timezone.utc)
+        if rotation == "hourly":
+            return (now.hour // max(1, 24 // total)) % total
+        return now.toordinal() % total
+
+    def _operational_leagues(self) -> tuple[LeagueConfig, ...]:
+        leagues = load_enabled_leagues()
+        total_text = os.getenv("FOVRA_API_FOOTBALL_BATCH_TOTAL", "1")
+        try:
+            total = max(1, int(total_text))
+        except ValueError:
+            logger.warning("Ignoring invalid FOVRA_API_FOOTBALL_BATCH_TOTAL=%s", total_text)
+            return leagues
+        if total == 1:
+            return leagues
+
+        index_text = os.getenv("FOVRA_API_FOOTBALL_BATCH_INDEX")
+        if index_text is None:
+            rotation = os.getenv("FOVRA_API_FOOTBALL_BATCH_ROTATION", "daily").strip().lower()
+            index = self._batch_index(total, rotation)
+        else:
+            try:
+                index = int(index_text)
+            except ValueError:
+                logger.warning("Ignoring invalid FOVRA_API_FOOTBALL_BATCH_INDEX=%s", index_text)
+                return leagues
+
+        index %= total
+        selected = tuple(league for offset, league in enumerate(leagues) if offset % total == index)
+        logger.info("API-Football league batch %s/%s selected %s of %s leagues", index + 1, total, len(selected), len(leagues))
+        return selected
+
     def _get_results_fixture_batches(self, days: tuple[Any, ...]) -> list[list[dict[str, Any]]]:
         batches: list[list[dict[str, Any]]] = []
         pending = list(load_enabled_leagues())
@@ -187,7 +221,7 @@ class APIFootballProvider:
         if mode == "results":
             fixture_batches = self._get_results_fixture_batches((today - timedelta(days=1), today))
         else:
-            for league in load_enabled_leagues():
+            for league in self._operational_leagues():
                 fixture_batches.append(self._get_league_fixtures(league, **date_params))
 
         for batch in fixture_batches:
@@ -232,7 +266,7 @@ class APIFootballProvider:
 
     def fetch_standings(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for league in load_enabled_leagues():
+        for league in self._operational_leagues():
             for block in self._get_standings(league):
                 season = self.season_for_league(league)
                 for standing in block.get("league", {}).get("standings", [[]])[0]:
