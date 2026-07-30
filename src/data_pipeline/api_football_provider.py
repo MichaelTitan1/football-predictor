@@ -36,7 +36,7 @@ class APIFootballProvider:
         self._league_by_api_id = api_football_id_map()
         self._cache: dict[tuple[str, tuple[tuple[str, Any], ...]], Any] = {}
         self._season_cache: dict[str, int] = {}
-        self._season_candidates_cache: dict[str, list[int]] = {}
+        self._unavailable_seasons: dict[str, set[int]] = {}
         self.match_metadata: dict[str, dict[str, Any]] = {}
         self.request_count = 0
 
@@ -71,42 +71,48 @@ class APIFootballProvider:
         text = str(exc.errors).lower()
         return "plan" in text and "season" in text
 
-    def _discover_season_candidates(self, league: LeagueConfig) -> list[int]:
-        if league.key in self._season_candidates_cache:
-            return self._season_candidates_cache[league.key]
-        seasons: list[int] = []
-        for row in self._get("leagues", id=league.api_football_id):
-            for season_info in row.get("seasons", []):
-                year = season_info.get("year")
-                coverage = season_info.get("coverage", {})
-                fixtures = coverage.get("fixtures", {}) if isinstance(coverage, dict) else {}
-                if isinstance(year, int) and fixtures:
-                    seasons.append(year)
-        seasons = sorted(set(seasons), reverse=True)
-        if self.preferred_season is not None:
-            seasons = [season for season in seasons if season <= self.preferred_season]
-        if not seasons:
-            raise RuntimeError(f"No API-Football seasons discovered for league {league.key}")
-        self._season_candidates_cache[league.key] = seasons
-        return seasons
+    @staticmethod
+    def _current_season() -> int:
+        now = datetime.now(timezone.utc)
+        return now.year if now.month >= 7 else now.year - 1
+
+    @staticmethod
+    def _fallback_season_from_error(exc: APIFootballProviderError, attempted_season: int) -> int | None:
+        years = [int(year) for year in re.findall(r"\b(20\d{2})\b", str(exc.errors))]
+        candidates = [year for year in years if year < attempted_season]
+        return max(candidates) if candidates else None
 
     def season_for_league(self, league: LeagueConfig) -> int:
         if league.key not in self._season_cache:
-            season = self._discover_season_candidates(league)[0]
+            season = self.preferred_season if self.preferred_season is not None else self._current_season()
             self._season_cache[league.key] = season
-            logger.info("League %s using season %s", league.key, season)
+            logger.info("League %s using configured season %s", league.key, season)
         return self._season_cache[league.key]
 
-    def _mark_season_unavailable(self, league: LeagueConfig, season: int) -> int | None:
-        candidates = [candidate for candidate in self._discover_season_candidates(league) if candidate < season]
-        self._season_candidates_cache[league.key] = candidates
-        self._season_cache.pop(league.key, None)
-        if not candidates:
-            logger.warning("No API-Football free-plan season remains available for league %s", league.key)
+    def _mark_season_unavailable(
+        self,
+        league: LeagueConfig,
+        season: int,
+        exc: APIFootballProviderError,
+    ) -> int | None:
+        unavailable_by_league = getattr(self, "_unavailable_seasons", None)
+        if unavailable_by_league is None:
+            unavailable_by_league = self._unavailable_seasons = {}
+        unavailable = unavailable_by_league.setdefault(league.key, set())
+        if season in unavailable:
+            logger.warning("Season %s already failed for league %s during this run", season, league.key)
             return None
-        self._season_cache[league.key] = candidates[0]
-        logger.info("League %s using season %s", league.key, candidates[0])
-        return candidates[0]
+        unavailable.add(season)
+
+        fallback = self._fallback_season_from_error(exc, season)
+        if fallback is None or fallback in unavailable:
+            logger.warning("No API-Football free-plan fallback season found for league %s", league.key)
+            self._season_cache.pop(league.key, None)
+            return None
+
+        self._season_cache[league.key] = fallback
+        logger.info("League %s using fallback season %s", league.key, fallback)
+        return fallback
 
     @staticmethod
     def _status(short: str) -> str:
@@ -130,7 +136,7 @@ class APIFootballProvider:
             except APIFootballProviderError as exc:
                 if not self._is_season_plan_error(exc):
                     raise
-                fallback = self._mark_season_unavailable(league, season)
+                fallback = self._mark_season_unavailable(league, season, exc)
                 if fallback is None:
                     return []
 
@@ -142,9 +148,43 @@ class APIFootballProvider:
             except APIFootballProviderError as exc:
                 if not self._is_season_plan_error(exc):
                     raise
-                fallback = self._mark_season_unavailable(league, season)
+                fallback = self._mark_season_unavailable(league, season, exc)
                 if fallback is None:
                     return []
+
+    @staticmethod
+    def _batch_index(total: int, rotation: str) -> int:
+        now = datetime.now(timezone.utc)
+        if rotation == "hourly":
+            return (now.hour // max(1, 24 // total)) % total
+        return now.toordinal() % total
+
+    def _operational_leagues(self) -> tuple[LeagueConfig, ...]:
+        leagues = load_enabled_leagues()
+        total_text = os.getenv("FOVRA_API_FOOTBALL_BATCH_TOTAL", "1")
+        try:
+            total = max(1, int(total_text))
+        except ValueError:
+            logger.warning("Ignoring invalid FOVRA_API_FOOTBALL_BATCH_TOTAL=%s", total_text)
+            return leagues
+        if total == 1:
+            return leagues
+
+        index_text = os.getenv("FOVRA_API_FOOTBALL_BATCH_INDEX")
+        if index_text is None:
+            rotation = os.getenv("FOVRA_API_FOOTBALL_BATCH_ROTATION", "daily").strip().lower()
+            index = self._batch_index(total, rotation)
+        else:
+            try:
+                index = int(index_text)
+            except ValueError:
+                logger.warning("Ignoring invalid FOVRA_API_FOOTBALL_BATCH_INDEX=%s", index_text)
+                return leagues
+
+        index %= total
+        selected = tuple(league for offset, league in enumerate(leagues) if offset % total == index)
+        logger.info("API-Football league batch %s/%s selected %s of %s leagues", index + 1, total, len(selected), len(leagues))
+        return selected
 
     def _get_results_fixture_batches(self, days: tuple[Any, ...]) -> list[list[dict[str, Any]]]:
         batches: list[list[dict[str, Any]]] = []
@@ -162,7 +202,7 @@ class APIFootballProvider:
                     if not self._is_season_plan_error(exc):
                         raise
                     for league in leagues:
-                        if self._mark_season_unavailable(league, season) is not None:
+                        if self._mark_season_unavailable(league, season, exc) is not None:
                             pending.append(league)
         return batches
 
@@ -181,7 +221,7 @@ class APIFootballProvider:
         if mode == "results":
             fixture_batches = self._get_results_fixture_batches((today - timedelta(days=1), today))
         else:
-            for league in load_enabled_leagues():
+            for league in self._operational_leagues():
                 fixture_batches.append(self._get_league_fixtures(league, **date_params))
 
         for batch in fixture_batches:
@@ -226,7 +266,7 @@ class APIFootballProvider:
 
     def fetch_standings(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for league in load_enabled_leagues():
+        for league in self._operational_leagues():
             for block in self._get_standings(league):
                 season = self.season_for_league(league)
                 for standing in block.get("league", {}).get("standings", [[]])[0]:
