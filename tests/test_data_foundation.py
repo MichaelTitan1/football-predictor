@@ -1,3 +1,11 @@
+from __future__ import annotations
+
+import pandas as pd
+
+from src.data_pipeline.canonical_data import LeagueRecord, MatchRecord, TeamRecord
+from src.data_pipeline.football_data_provider import FootballDataProvider
+
+
 def test_match_key_is_deterministic_and_source_id_stable():
     b = MatchRecord("provider", "EPL", "2025-2026", "2026-01-01T16:00:00+00:00", "home", "away", source_id="source-1")
     assert a.match_key == b.match_key
