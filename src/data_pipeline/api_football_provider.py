@@ -95,16 +95,21 @@ class APIFootballProvider:
         season: int,
         exc: APIFootballProviderError,
     ) -> int | None:
-        unavailable = self._unavailable_seasons.setdefault(league.key, set())
+        unavailable_by_league = getattr(self, "_unavailable_seasons", None)
+        if unavailable_by_league is None:
+            unavailable_by_league = self._unavailable_seasons = {}
+        unavailable = unavailable_by_league.setdefault(league.key, set())
         if season in unavailable:
             logger.warning("Season %s already failed for league %s during this run", season, league.key)
             return None
         unavailable.add(season)
+
         fallback = self._fallback_season_from_error(exc, season)
         if fallback is None or fallback in unavailable:
             logger.warning("No API-Football free-plan fallback season found for league %s", league.key)
             self._season_cache.pop(league.key, None)
             return None
+
         self._season_cache[league.key] = fallback
         logger.info("League %s using fallback season %s", league.key, fallback)
         return fallback
