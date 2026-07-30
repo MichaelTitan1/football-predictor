@@ -5,7 +5,7 @@ on:
     # Daily low-cost maintenance: check for new historical seasons only,
     # refresh fixtures once, refresh ClubElo once, and refresh next-24h weather.
     - cron: '10 3 * * *'
-    # API-Football results + standings every 8 hours: 3 runs/day.
+    # API-Football results every 8 hours: 3 runs/day.
     - cron: '20 */8 * * *'
   workflow_dispatch:
     inputs:
@@ -78,7 +78,7 @@ jobs:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: python -m src.data_pipeline.update_canonical --source api-football --mode fixtures
 
-      - name: Fetch API-Football results and standings
+      - name: Fetch API-Football results
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'results'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

@@ -127,13 +127,6 @@ def run(
                 store._request("PATCH", "matches", params={"canonical_key": f"eq.{canonical_key}"}, payload=clean)
                 venue_updates += 1
 
-        standings_upserted = 0
-        if source != "football-data" and mode in {"results", "standings"}:
-            rows = provider.fetch_standings()
-            store.upsert("league_standings", rows, "league_canonical_key,team_canonical_key,season")
-            standings_upserted = len(rows)
-
-
         logger.info(
             "FOVRA: resolving finished predictions"
         )
@@ -193,7 +186,6 @@ def run(
             "fetched_at": snapshot.fetched_at,
             "records_seen": len(snapshot.matches),
             "records_upserted": upserted,
-            "standings_upserted": standings_upserted,
             "venue_updates": venue_updates,
             "api_football_requests": getattr(provider, "request_count", None),
             "prediction_results_resolved": resolved,
@@ -268,7 +260,7 @@ def main() -> None:
 
     parser.add_argument("--db", default="data/processed/fovra_data.sqlite3")
     parser.add_argument("--source", choices=["api-football", "football-data"], default="api-football")
-    parser.add_argument("--mode", choices=["fixtures", "results", "standings"], default="fixtures")
+    parser.add_argument("--mode", choices=["fixtures", "results"], default="fixtures")
 
 
     args = parser.parse_args()
