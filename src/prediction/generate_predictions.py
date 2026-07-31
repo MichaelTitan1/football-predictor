@@ -15,7 +15,7 @@ from src.prediction.canonical_service import CanonicalPredictionService
 def run(limit: int = 100) -> dict:
     repo = FovraRepository()
     store = SupabaseStore()
-    service = CanonicalPredictionService()
+    service = CanonicalPredictionService(store=store)
     metadata = service.metadata()
     store.upsert("model_versions", [{**metadata, "is_active": True}], "version")
     matches = repo.upcoming(limit)
@@ -25,7 +25,8 @@ def run(limit: int = 100) -> dict:
         try:
             home = str(match["home_team_canonical_key"]).split(":", 1)[-1]
             away = str(match["away_team_canonical_key"]).split(":", 1)[-1]
-            result = service.predict(home, away)
+            context = service.context_for_match(match)
+            result = service.predict(home, away, context=context)
             service.archive(str(match["canonical_key"]), result, store)
             generated += 1
         except Exception as exc:

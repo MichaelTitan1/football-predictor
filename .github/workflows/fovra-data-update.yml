@@ -2,11 +2,8 @@ name: Fovra data update
 
 on:
   schedule:
-    # Daily low-cost maintenance: check for new historical seasons only,
-    # refresh fixtures once, refresh ClubElo once, and refresh next-24h weather.
-    - cron: '10 3 * * *'
-    # API-Football results every 8 hours: 3 runs/day.
-    - cron: '20 */8 * * *'
+    # Complete free-provider refresh every 6 hours.
+    - cron: '10 */6 * * *'
   workflow_dispatch:
     inputs:
       task:
@@ -14,12 +11,12 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, daily, results, fixtures, weather, clubelo, historical, bootstrap-historical]
+        options: [all, football-data, fbref, clubelo, weather, features, predictions, results, bootstrap-historical]
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,86 +24,62 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
 
-      - name: Resolve scheduled task
+      - name: Resolve task
         id: task
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "task=${{ inputs.task }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "20 */8 * * *" ]; then
-            echo "task=results" >> "$GITHUB_OUTPUT"
           else
-            echo "task=daily" >> "$GITHUB_OUTPUT"
+            echo "task=all" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check for new Football-Data seasons only
-        id: historical
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'historical'
+      - name: Update Football-Data historical/current CSVs
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data'
         run: |
-          python -m src.data_pipeline.data_downloader | tee historical.json
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          from pathlib import Path
-          payload = json.loads(Path('historical.json').read_text())
-          downloaded = int(payload.get('downloaded_files', 0))
-          print(f"downloaded_files={downloaded}")
-          print(f"changed={'true' if downloaded else 'false'}")
-          PY
+          python -m src.data_pipeline.data_downloader
+          python -m src.data_pipeline.prepare_merged_dataset
 
-      - name: Initial historical bootstrap from 2010
-        id: bootstrap
+      - name: Initial Football-Data bootstrap from 2010
         if: steps.task.outputs.task == 'bootstrap-historical'
         run: |
-          python -m src.data_pipeline.data_downloader --bootstrap | tee historical.json
-          echo "changed=true" >> "$GITHUB_OUTPUT"
+          python -m src.data_pipeline.data_downloader --bootstrap
+          python -m src.data_pipeline.prepare_merged_dataset
 
-      - name: Build merged historical dataset
-        if: steps.historical.outputs.changed == 'true' || steps.bootstrap.outputs.changed == 'true'
-        run: python -m src.data_pipeline.prepare_merged_dataset
-
-      - name: Train CatBoost model from real historical data
-        if: steps.historical.outputs.changed == 'true' || steps.bootstrap.outputs.changed == 'true'
-        env:
-          FOVRA_CATBOOST_ITERATIONS: "600"
-          FOVRA_CATBOOST_VERBOSE: "100"
-        run: python -m src.models.ensemble_model
-
-      - name: Fetch API-Football fixtures once daily
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'fixtures'
+      - name: Upsert Football-Data canonical matches and resolve completed results
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          FOVRA_API_FOOTBALL_BATCH_TOTAL: "3"
-          FOVRA_API_FOOTBALL_BATCH_ROTATION: daily
-        run: python -m src.data_pipeline.update_canonical --source api-football --mode fixtures
+        run: python -m src.data_pipeline.update_canonical --source football-data
 
-      - name: Fetch API-Football results
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'results'
+      - name: Refresh Soccerdata FBref team statistics
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'fbref'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          FOVRA_API_FOOTBALL_BATCH_TOTAL: "3"
-          FOVRA_API_FOOTBALL_BATCH_ROTATION: hourly
-        run: python -m src.data_pipeline.update_canonical --source api-football --mode results
+        run: python -c "from src.data_pipeline.soccerdata_provider import refresh_fbref_team_stats; print(refresh_fbref_team_stats())"
 
-      - name: Refresh ClubElo once daily
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'clubelo'
+      - name: Refresh ClubElo team strength
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
 
-      - name: Refresh MET Norway weather for next-24h fixtures
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'weather'
+      - name: Refresh MET Norway weather
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'weather'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           MET_NORWAY_USER_AGENT: ${{ vars.MET_NORWAY_USER_AGENT }}
         run: python -c "from src.data_pipeline.enrichment import refresh_weather; print(refresh_weather())"
 
-      - name: Generate persisted CatBoost predictions after football data updates
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'daily' || steps.task.outputs.task == 'fixtures' || steps.task.outputs.task == 'results'
+      - name: Refresh features
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'features'
+        run: python -m src.data_pipeline.prepare_merged_dataset
+
+      - name: Generate and archive Match Winner 1X2 predictions
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'predictions'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

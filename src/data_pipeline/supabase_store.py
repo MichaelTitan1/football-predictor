@@ -5,12 +5,17 @@ used only by trusted backend/update jobs; browser clients never receive it.
 """
 from __future__ import annotations
 import os
+import logging
+import time
 from dotenv import load_dotenv
 load_dotenv()
 from datetime import datetime, timezone
 from typing import Any, Iterable
+import math
 import requests
 from .canonical_data import LeagueRecord, MatchRecord, TeamRecord
+
+logger = logging.getLogger(__name__)
 
 class SupabaseStoreError(RuntimeError): pass
 
@@ -20,8 +25,20 @@ class SupabaseStore:
         if not self.url or not self.key: raise SupabaseStoreError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SECRET_KEY) are required")
     @property
     def headers(self): return {"apikey":self.key,"Authorization":f"Bearer {self.key}","Content-Type":"application/json","Prefer":"return=minimal,resolution=merge-duplicates"}
+    @staticmethod
+    def _jsonable(value):
+        if isinstance(value, dict):
+            return {k: SupabaseStore._jsonable(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [SupabaseStore._jsonable(v) for v in value]
+        if hasattr(value, "item"):
+            value = value.item()
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return value
     def _request(self,method,table,*,params=None,payload=None,prefer=None):
         headers=dict(self.headers)
+        payload = self._jsonable(payload)
         if prefer: headers["Prefer"]=prefer
         response=requests.request(method,f"{self.url}/rest/v1/{table}",headers=headers,params=params,json=payload,timeout=self.timeout)
         if response.status_code>=400: raise SupabaseStoreError(f"Supabase {method} {table} failed ({response.status_code}): {response.text[:1000]}")
@@ -30,6 +47,53 @@ class SupabaseStore:
         except ValueError:return response.text
     def upsert(self,table,rows,on_conflict):
         if rows:self._request("POST",table,params={"on_conflict":on_conflict},payload=rows)
+    @staticmethod
+    def _batch_size() -> int:
+        try:
+            return max(1, int(os.getenv("FOVRA_SUPABASE_BATCH_SIZE", "500")))
+        except ValueError:
+            logger.warning("Invalid FOVRA_SUPABASE_BATCH_SIZE; defaulting to 500")
+            return 500
+    @staticmethod
+    def _batch_retries() -> int:
+        try:
+            return max(1, int(os.getenv("FOVRA_SUPABASE_BATCH_RETRIES", "3")))
+        except ValueError:
+            logger.warning("Invalid FOVRA_SUPABASE_BATCH_RETRIES; defaulting to 3")
+            return 3
+    @staticmethod
+    def _batch_start() -> int:
+        try:
+            return max(1, int(os.getenv("FOVRA_SUPABASE_MATCH_BATCH_START", "1")))
+        except ValueError:
+            logger.warning("Invalid FOVRA_SUPABASE_MATCH_BATCH_START; starting at batch 1")
+            return 1
+    def upsert_batched(self, table, rows, on_conflict, *, batch_size=None, start_batch=1):
+        rows=list(rows)
+        if not rows:
+            return {"uploaded": 0, "failed": 0, "remaining": 0, "failed_batches": []}
+        size=batch_size or self._batch_size(); total=(len(rows)+size-1)//size; uploaded=0; failed=0; failed_batches=[]; started=time.monotonic()
+        for batch_number in range(max(1,start_batch), total+1):
+            start=(batch_number-1)*size; end=min(start+size, len(rows)); batch=rows[start:end]
+            remaining=max(0, len(rows)-start)
+            elapsed=max(0.001, time.monotonic()-started)
+            rate=uploaded/elapsed if uploaded else 0
+            eta_seconds=int(remaining/rate) if rate else None
+            eta=f"{eta_seconds}s" if eta_seconds is not None else "calculating"
+            logger.info("Uploading batch %s/%s", batch_number, total)
+            logger.info("Rows processed=%s rows uploaded=%s rows remaining=%s estimated completion=%s", len(rows), uploaded, remaining, eta)
+            for attempt in range(1, self._batch_retries()+1):
+                try:
+                    self.upsert(table, batch, on_conflict)
+                    uploaded += len(batch)
+                    break
+                except Exception as exc:
+                    logger.warning("Batch %s/%s attempt %s failed: %s", batch_number, total, attempt, exc)
+                    if attempt >= self._batch_retries():
+                        failed += len(batch); failed_batches.append(batch_number)
+                    else:
+                        time.sleep(min(30, 2 ** (attempt - 1)))
+        return {"uploaded": uploaded, "failed": failed, "remaining": failed, "failed_batches": failed_batches}
     def record_ingestion_start(self,provider):
         result=self._request("POST","ingestion_runs",params={"select":"id"},payload={"provider_key":provider,"status":"running","started_at":datetime.now(timezone.utc).isoformat()},prefer="return=representation")
         if not result: raise SupabaseStoreError("Supabase did not return an ingestion run id")
@@ -37,11 +101,16 @@ class SupabaseStore:
     def record_ingestion_finish(self,run_id,*,status,records_seen,records_upserted,newest_match_at=None,error_message=None):
         self._request("PATCH","ingestion_runs",params={"id":f"eq.{run_id}"},payload={"finished_at":datetime.now(timezone.utc).isoformat(),"status":status,"records_seen":records_seen,"records_upserted":records_upserted,"newest_match_at":newest_match_at,"error_message":error_message[:2000] if error_message else None})
     def upsert_snapshot(self,leagues:Iterable[LeagueRecord],teams:Iterable[TeamRecord],matches:Iterable[MatchRecord],provider:str,fetched_at:str)->int:
-        now=datetime.now(timezone.utc).isoformat(); match_list=list(matches)
-        self.upsert("leagues",[{"canonical_key":l.key,"name":l.name,"source_provider":provider,"source_updated_at":fetched_at,"updated_at":now} for l in leagues],"canonical_key")
-        self.upsert("teams",[{"canonical_key":f"{t.league_key}:{t.key}","league_canonical_key":t.league_key,"name":t.name,"source_provider":provider,"source_updated_at":fetched_at,"updated_at":now} for t in teams],"canonical_key")
-        self.upsert("matches",[{"canonical_key":m.match_key,"league_canonical_key":m.league_key,"season":m.season,"kickoff_at":m.kickoff_utc,"status":m.status,"home_team_canonical_key":f"{m.league_key}:{m.home_team}","away_team_canonical_key":f"{m.league_key}:{m.away_team}","home_score":m.home_score,"away_score":m.away_score,"source_provider":provider,"source_match_id":m.source_id,"source_updated_at":fetched_at,"updated_at":now} for m in match_list],"canonical_key")
-        return len(match_list)
+        now=datetime.now(timezone.utc).isoformat(); league_list=list(leagues); team_list=list(teams); match_list=list(matches)
+        logger.info("Downloaded leagues=%s skipped leagues=%s rows processed=%s", len(league_list), 0, len(match_list))
+        self.upsert("leagues",[{"canonical_key":l.key,"name":l.name,"source_provider":provider,"source_updated_at":fetched_at,"updated_at":now} for l in league_list],"canonical_key")
+        self.upsert("teams",[{"canonical_key":f"{t.league_key}:{t.key}","league_canonical_key":t.league_key,"name":t.name,"source_provider":provider,"source_updated_at":fetched_at,"updated_at":now} for t in team_list],"canonical_key")
+        match_rows=[{"canonical_key":m.match_key,"league_canonical_key":m.league_key,"season":m.season,"kickoff_at":m.kickoff_utc,"status":m.status,"home_team_canonical_key":f"{m.league_key}:{m.home_team}","away_team_canonical_key":f"{m.league_key}:{m.away_team}","home_score":m.home_score,"away_score":m.away_score,"source_provider":provider,"source_match_id":m.source_id,"source_updated_at":fetched_at,"updated_at":now} for m in match_list]
+        progress=self.upsert_batched("matches", match_rows, "canonical_key", start_batch=self._batch_start())
+        logger.info("Rows processed=%s rows uploaded=%s rows remaining=%s estimated completion=upload phase complete", len(match_rows), progress["uploaded"], progress["remaining"])
+        if progress["failed_batches"]:
+            logger.warning("Failed match batches after retries: %s", progress["failed_batches"])
+        return int(progress["uploaded"])
     def resolve_predictions(self, matches: Iterable[MatchRecord]) -> int:
         """
         Resolve only predictions that exist in prediction_archive.

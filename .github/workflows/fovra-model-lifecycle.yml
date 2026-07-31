@@ -1,0 +1,48 @@
+name: Fovra model lifecycle
+
+on:
+  schedule:
+    # Retrain weekly using completed historical matches only.
+    - cron: '30 4 * * 1'
+    # Evaluate challenger monthly before any manual production promotion.
+    - cron: '45 5 1 * *'
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Model task
+        required: true
+        default: retrain
+        type: choice
+        options: [retrain, evaluate]
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Resolve task
+        id: task
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "task=${{ inputs.task }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "45 5 1 * *" ]; then
+            echo "task=evaluate" >> "$GITHUB_OUTPUT"
+          else
+            echo "task=retrain" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build completed-match training dataset
+        run: python -m src.data_pipeline.prepare_merged_dataset
+      - name: Retrain CatBoost challenger
+        if: steps.task.outputs.task == 'retrain'
+        env:
+          FOVRA_CATBOOST_ITERATIONS: "600"
+          FOVRA_CATBOOST_VERBOSE: "100"
+        run: python -m src.models.ensemble_model
+      - name: Evaluate production versus challenger
+        if: steps.task.outputs.task == 'evaluate'
+        run: python -m src.evaluation.backtest

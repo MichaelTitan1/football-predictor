@@ -10,3 +10,4 @@ fastapi>=0.115
 uvicorn[standard]>=0.34
 pytest>=8.0
 python-dotenv>=1.0
+soccerdata>=1.8
