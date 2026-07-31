@@ -100,8 +100,8 @@ def test_provider_normalizes_result_statuses():
 
 def test_enabled_leagues_are_single_configured_v1_set():
     leagues = load_enabled_leagues()
-    assert len(leagues) == 15
-    assert len({league.key for league in leagues}) == 15
+    assert len(leagues) == 24
+    assert len({league.key for league in leagues}) == 24
     assert all(league.football_data_code for league in leagues)
     assert all(league.api_football_id for league in leagues)
 
@@ -216,3 +216,36 @@ def test_api_football_falls_back_when_newest_season_is_not_on_free_plan():
     fixture_seasons = [params["season"] for path, params in provider.calls if path == "fixtures"]
     assert 2026 in fixture_seasons
     assert 2024 in fixture_seasons
+
+
+def test_prediction_service_consumes_team_statistics_before_prediction():
+    from src.prediction.canonical_service import CanonicalPredictionService
+
+    service = object.__new__(CanonicalPredictionService)
+    row = pd.DataFrame(
+        [
+            {
+                "home_elo_prior": 1500.0,
+                "away_elo_prior": 1500.0,
+                "expected_home_xg": 1.0,
+                "expected_away_xg": 1.0,
+                "xg_diff": 0.0,
+                "elo_diff_home_minus_away": 0.0,
+            }
+        ]
+    )
+    context = {
+        "home_team_statistics": {"xg": 2.1, "goals": 2.4, "xga": 0.8},
+        "away_team_statistics": {"xg": 0.9, "goals": 1.0, "xga": 1.7},
+        "home_team_strength": {"elo": 1700.0},
+        "away_team_strength": {"elo": 1500.0},
+    }
+
+    enriched = service._apply_enrichment_to_row(row, context)
+
+    assert enriched.loc[0, "expected_home_xg"] == 2.1
+    assert enriched.loc[0, "expected_away_xg"] == 0.9
+    assert enriched.loc[0, "home_elo_prior"] == 1700.0
+    assert enriched.loc[0, "away_elo_prior"] == 1500.0
+    assert enriched.loc[0, "xg_diff"] == 1.2000000000000002
+    assert enriched.loc[0, "elo_diff_home_minus_away"] == 200.0

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 from datetime import datetime, timezone
 from typing import Any, Iterable
+import math
 import requests
 from .canonical_data import LeagueRecord, MatchRecord, TeamRecord
 
@@ -20,8 +21,20 @@ class SupabaseStore:
         if not self.url or not self.key: raise SupabaseStoreError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SECRET_KEY) are required")
     @property
     def headers(self): return {"apikey":self.key,"Authorization":f"Bearer {self.key}","Content-Type":"application/json","Prefer":"return=minimal,resolution=merge-duplicates"}
+    @staticmethod
+    def _jsonable(value):
+        if isinstance(value, dict):
+            return {k: SupabaseStore._jsonable(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [SupabaseStore._jsonable(v) for v in value]
+        if hasattr(value, "item"):
+            value = value.item()
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return value
     def _request(self,method,table,*,params=None,payload=None,prefer=None):
         headers=dict(self.headers)
+        payload = self._jsonable(payload)
         if prefer: headers["Prefer"]=prefer
         response=requests.request(method,f"{self.url}/rest/v1/{table}",headers=headers,params=params,json=payload,timeout=self.timeout)
         if response.status_code>=400: raise SupabaseStoreError(f"Supabase {method} {table} failed ({response.status_code}): {response.text[:1000]}")

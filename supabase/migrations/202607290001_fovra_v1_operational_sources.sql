@@ -53,7 +53,7 @@ create index if not exists match_weather_forecast_idx on public.match_weather(fo
 insert into public.data_sources(provider_key, display_name, base_url, freshness_policy)
 values
   ('api-football', 'API-Football', 'https://v3.football.api-sports.io', 'fixtures daily, results every two hours'),
-  ('clubelo', 'ClubElo', 'http://api.clubelo.com', 'daily'),
+  ('clubelo', 'ClubElo', 'http://api.clubelo.com', 'every six hours'),
   ('met-norway', 'MET Norway Locationforecast', 'https://api.met.no/weatherapi/locationforecast/2.0', 'fixtures inside next 24 hours every four hours')
 on conflict (provider_key) do update set display_name = excluded.display_name, base_url = excluded.base_url, freshness_policy = excluded.freshness_policy, updated_at = now();
 
