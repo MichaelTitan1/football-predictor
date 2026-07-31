@@ -45,6 +45,9 @@ REQUIRED_COLS = {"Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"}
 HTTP_TIMEOUT = 30
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+PERMANENT_UNAVAILABLE_STATUS = {404}
+SKIPPED_LEAGUES: dict[str, str] = {}
+ROWS_PROCESSED = 0
 
 
 def _season_code(season_start: int) -> str:
@@ -63,20 +66,35 @@ def _http_get(url: str) -> Optional[bytes]:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             if requests is None:
+                from urllib.error import HTTPError
                 from urllib.request import urlopen
-                with urlopen(url, timeout=HTTP_TIMEOUT) as resp:
-                    if getattr(resp, "status", 200) >= 200:
-                        return resp.read()
-                    last_exc = Exception(f"HTTP {getattr(resp, 'status', 'unknown')}")
+                try:
+                    with urlopen(url, timeout=HTTP_TIMEOUT) as resp:
+                        status = getattr(resp, "status", 200)
+                        if status == 200:
+                            return resp.read()
+                        if status in PERMANENT_UNAVAILABLE_STATUS:
+                            logger.info("provider unavailable: %s returned HTTP %s", url, status)
+                            return None
+                        last_exc = Exception(f"HTTP {status}")
+                except HTTPError as exc:
+                    if exc.code in PERMANENT_UNAVAILABLE_STATUS:
+                        logger.info("provider unavailable: %s returned HTTP %s", url, exc.code)
+                        return None
+                    raise
             else:
                 resp = requests.get(url, timeout=HTTP_TIMEOUT)
                 if resp.status_code == 200:
                     return resp.content
+                if resp.status_code in PERMANENT_UNAVAILABLE_STATUS:
+                    logger.info("provider unavailable: %s returned HTTP %s", url, resp.status_code)
+                    return None
                 last_exc = Exception(f"HTTP {resp.status_code}")
         except Exception as exc:
             last_exc = exc
             logger.debug("Attempt %d failed for %s: %s", attempt, url, exc)
-        time.sleep(RETRY_DELAY)
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_DELAY)
     logger.info("Failed to download %s after %d attempts: %s", url, MAX_RETRIES, last_exc)
     return None
 
@@ -130,6 +148,8 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
     logger.info("Downloading %s season %s from %s", league_key, season_start, url)
     data = _http_get(url)
     if data is None:
+        SKIPPED_LEAGUES[league_key] = "provider unavailable"
+        logger.info("provider unavailable: skipping %s season %s", league_key, season_start)
         return False
     try:
         from io import BytesIO
@@ -139,6 +159,8 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
         return False
 
     df.columns = [str(c).strip() for c in df.columns]
+    global ROWS_PROCESSED
+    ROWS_PROCESSED += len(df)
     if not _validate_dataframe(df):
         logger.warning("Downloaded CSV for %s %s failed validation; not saved.", league_key, season_start)
         return False
@@ -208,4 +230,16 @@ if __name__ == "__main__":
     else:
         logger.info("Checking for missing/new football-data.co.uk seasons only")
         result = update_latest_season()
-    print(json.dumps({"downloaded_files": sum(len(v) for v in result.values()), "result": result}, indent=2))
+    downloaded = {league: years for league, years in result.items() if years}
+    remaining = [league for league in ALLOWED_LEAGUES if league not in downloaded and league not in SKIPPED_LEAGUES]
+    print(json.dumps({
+        "downloaded_files": sum(len(v) for v in result.values()),
+        "downloaded_leagues": downloaded,
+        "skipped_leagues": SKIPPED_LEAGUES,
+        "rows_processed": ROWS_PROCESSED,
+        "rows_uploaded": 0,
+        "rows_remaining": 0,
+        "estimated_completion": "download phase complete",
+        "remaining_without_new_download": remaining,
+        "result": result,
+    }, indent=2))

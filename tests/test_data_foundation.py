@@ -249,3 +249,50 @@ def test_prediction_service_consumes_team_statistics_before_prediction():
     assert enriched.loc[0, "away_elo_prior"] == 1500.0
     assert enriched.loc[0, "xg_diff"] == 1.2000000000000002
     assert enriched.loc[0, "elo_diff_home_minus_away"] == 200.0
+
+def test_football_data_permanent_404_is_provider_unavailable_without_retries(monkeypatch):
+    from src.data_pipeline import data_downloader
+
+    calls = []
+
+    class Response:
+        status_code = 404
+        content = b""
+
+    def fake_get(url, timeout):
+        calls.append(url)
+        return Response()
+
+    monkeypatch.setattr(data_downloader.requests, "get", fake_get)
+    assert data_downloader._http_get("https://example.invalid/missing.csv") is None
+    assert len(calls) == 1
+
+
+def test_supabase_match_upsert_batches_and_continues_after_failed_batch(monkeypatch):
+    from src.data_pipeline.supabase_store import SupabaseStore, SupabaseStoreError
+
+    store = object.__new__(SupabaseStore)
+    store.url = "https://example.supabase.co"
+    store.key = "service-role"
+    store.timeout = 30
+    calls = []
+
+    def fake_upsert(table, rows, on_conflict):
+        calls.append((table, list(rows)))
+        if len(calls) == 2:
+            raise SupabaseStoreError("temporary batch failure")
+
+    monkeypatch.setenv("FOVRA_SUPABASE_BATCH_RETRIES", "1")
+    monkeypatch.setattr(store, "upsert", fake_upsert)
+
+    result = store.upsert_batched(
+        "matches",
+        [{"id": idx} for idx in range(12)],
+        "canonical_key",
+        batch_size=5,
+    )
+
+    assert [len(rows) for _, rows in calls] == [5, 5, 2]
+    assert result["uploaded"] == 7
+    assert result["failed"] == 5
+    assert result["failed_batches"] == [2]
