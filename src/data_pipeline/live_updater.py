@@ -68,8 +68,9 @@ def _validate_and_clean(df: pd.DataFrame) -> pd.DataFrame:
     df["HomeTeam"] = df["HomeTeam"].astype(str).str.strip()
     df["AwayTeam"] = df["AwayTeam"].astype(str).str.strip()
 
-    # Parse Date column
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", infer_datetime_format=True)
+    # Parse Football-Data dates with explicit formats to avoid slow inference warnings.
+    from src.data_pipeline.dataset_manager import _parse_football_data_dates
+    df["Date"] = _parse_football_data_dates(df["Date"])
 
     # Convert goals to numeric
     df["FTHG"] = pd.to_numeric(df["FTHG"], errors="coerce")

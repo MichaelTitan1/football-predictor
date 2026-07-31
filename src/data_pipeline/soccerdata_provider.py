@@ -45,6 +45,36 @@ def _first(row: Any, names: tuple[str, ...]) -> Any:
     return None
 
 
+def _league_candidates(league: Any) -> tuple[str, ...]:
+    values = [league.fbref_name, league.name, league.key]
+    if league.country:
+        values.extend([f"{league.country}-{league.name}", f"{league.country}-{league.fbref_name or league.name}"])
+    return tuple(str(value).strip() for value in values if value)
+
+
+def _resolve_soccerdata_league(sd: Any, reader_name: str, league: Any) -> str | None:
+    reader = getattr(sd, reader_name)
+    try:
+        available = tuple(reader.available_leagues())
+    except Exception as exc:
+        logger.info("Could not list Soccerdata %s leagues: %s", reader_name, exc)
+        available = ()
+    if not available:
+        return league.fbref_name or league.name
+    available_by_lower = {str(item).lower(): str(item) for item in available}
+    for candidate in _league_candidates(league):
+        exact = available_by_lower.get(candidate.lower())
+        if exact:
+            return exact
+    for candidate in _league_candidates(league):
+        candidate_lower = candidate.lower()
+        matches = [item for item in available if str(item).split("-", 1)[-1].lower() == candidate_lower]
+        if len(matches) == 1:
+            return str(matches[0])
+    logger.info("FBref unsupported league %s; available Soccerdata leagues do not include %s", league.key, _league_candidates(league))
+    return None
+
+
 def refresh_fbref_team_stats(store: SupabaseStore | None = None, seasons: str | int | None = None) -> dict[str, Any]:
     store = store or SupabaseStore()
     try:
@@ -57,7 +87,10 @@ def refresh_fbref_team_stats(store: SupabaseStore | None = None, seasons: str | 
     rows: list[dict[str, Any]] = []
     skipped: list[str] = []
     for league in load_enabled_leagues():
-        fbref_name = league.fbref_name or league.name
+        fbref_name = _resolve_soccerdata_league(sd, "FBref", league)
+        if not fbref_name:
+            skipped.append(league.key)
+            continue
         try:
             fbref = sd.FBref(leagues=fbref_name, seasons=season)
             frames = []
@@ -79,7 +112,7 @@ def refresh_fbref_team_stats(store: SupabaseStore | None = None, seasons: str | 
                     out[target] = _first(row, aliases)
                 rows.append(out)
         except Exception as exc:
-            logger.info("Skipping unsupported FBref league %s: %s", fbref_name, exc)
+            logger.info("FBref unsupported league %s (%s): %s", league.key, fbref_name, exc)
             skipped.append(league.key)
     store.upsert("team_statistics", rows, "league_canonical_key,team_slug,season")
     return {"provider": "soccerdata-fbref", "rows": len(rows), "skipped_leagues": skipped, "updated_at": now}

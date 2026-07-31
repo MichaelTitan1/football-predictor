@@ -83,12 +83,10 @@ def load_csv(path: str | Path) -> pd.DataFrame:
         df = pd.read_csv(path, low_memory=False)
     except Exception as e:
         raise
-    # attempt to parse Date column deterministically if present
+    # Parse Football-Data dates with explicit formats to avoid slow inference warnings.
     if "Date" in df.columns:
-        try:
-            df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce", infer_datetime_format=True)
-        except Exception:
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        from src.data_pipeline.dataset_manager import _parse_football_data_dates
+        df["Date"] = _parse_football_data_dates(df["Date"])
     return df
 
 

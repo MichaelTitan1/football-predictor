@@ -371,3 +371,68 @@ def test_supabase_snapshot_retries_failed_batch_then_continues(monkeypatch):
     assert uploaded == 3
     match_posts = [call for call in session.calls if call[0] == "POST" and call[1] == "matches"]
     assert [len(call[2]["json"]) for call in match_posts] == [2, 2, 2, 2, 1]
+
+def test_football_data_404_marks_league_unavailable_and_stops(monkeypatch, tmp_path):
+    from src.data_pipeline import data_downloader
+
+    class Response404:
+        status_code = 404
+        content = b""
+
+    calls = []
+    monkeypatch.setattr(data_downloader, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(data_downloader, "UNAVAILABLE_PATH", tmp_path / "football_data_unavailable.json")
+    monkeypatch.setattr(data_downloader, "ALLOWED_LEAGUES", ["EPL"])
+    monkeypatch.setattr(data_downloader.time, "sleep", lambda _: None)
+    monkeypatch.setattr(data_downloader.requests, "get", lambda url, timeout: calls.append(url) or Response404())
+
+    result = data_downloader.download_all_leagues(2010, 2012)
+
+    assert result["EPL"] == []
+    assert len(calls) == 1
+    assert data_downloader.is_football_data_unavailable("EPL")
+
+
+def test_football_data_unavailable_league_skips_without_http(monkeypatch, tmp_path):
+    from src.data_pipeline import data_downloader
+
+    monkeypatch.setattr(data_downloader, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(data_downloader, "UNAVAILABLE_PATH", tmp_path / "football_data_unavailable.json")
+    data_downloader.mark_football_data_unavailable("EPL", "https://example.test/E0.csv")
+    monkeypatch.setattr(data_downloader.requests, "get", lambda *_, **__: (_ for _ in ()).throw(AssertionError("HTTP should not be called")))
+
+    assert data_downloader.download_season_data("EPL", 2011) is False
+
+
+def test_fbref_mapping_uses_soccerdata_available_league_ids():
+    from src.data_pipeline.league_config import LeagueConfig
+    from src.data_pipeline.soccerdata_provider import _resolve_soccerdata_league
+
+    class FakeFBref:
+        @staticmethod
+        def available_leagues():
+            return ["ENG-Premier League", "ESP-La Liga"]
+
+    class FakeSoccerData:
+        FBref = FakeFBref
+
+    league = LeagueConfig("EPL", "Premier League", 1, fbref_name="Premier League")
+
+    assert _resolve_soccerdata_league(FakeSoccerData, "FBref", league) == "ENG-Premier League"
+
+
+def test_fbref_unsupported_league_returns_none():
+    from src.data_pipeline.league_config import LeagueConfig
+    from src.data_pipeline.soccerdata_provider import _resolve_soccerdata_league
+
+    class FakeFBref:
+        @staticmethod
+        def available_leagues():
+            return ["ENG-Premier League"]
+
+    class FakeSoccerData:
+        FBref = FakeFBref
+
+    league = LeagueConfig("MLS", "Major League Soccer", 1, fbref_name="Major League Soccer")
+
+    assert _resolve_soccerdata_league(FakeSoccerData, "FBref", league) is None
