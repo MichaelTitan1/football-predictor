@@ -11,7 +11,7 @@ import pandas as pd
 import requests
 
 from .canonical_data import LeagueRecord, MatchRecord, TeamRecord
-from .data_downloader import LEAGUE_CONFIG
+from .data_downloader import LEAGUE_CONFIG, is_football_data_unavailable, mark_football_data_unavailable
 from .providers import ProviderSnapshot
 
 logger = logging.getLogger(__name__)
@@ -37,12 +37,22 @@ class FootballDataProvider:
         raw_date=row.get("Date"); raw_time=row.get("Time")
         if pd.isna(raw_date): raise ValueError("match has no date")
         text=str(raw_date).strip(); time_text="" if pd.isna(raw_time) else str(raw_time).strip()
-        parsed=pd.to_datetime(f"{text} {time_text}".strip(),dayfirst=True,errors="raise")
-        return parsed.replace(tzinfo=ZoneInfo("Europe/London")).astimezone(timezone.utc).isoformat(timespec="seconds")
+        value = f"{text} {time_text}".strip()
+        formats = ("%d/%m/%Y %H:%M", "%d/%m/%y %H:%M", "%d/%m/%Y", "%d/%m/%y")
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(value, fmt)
+                return parsed.replace(tzinfo=ZoneInfo("Europe/London")).astimezone(timezone.utc).isoformat(timespec="seconds")
+            except ValueError:
+                continue
+        raise ValueError(f"unsupported Football-Data date format: {value}")
     def _get(self,url:str):
         try:
-            r=requests.get(url,timeout=REQUEST_TIMEOUT); r.raise_for_status(); return r.content
-        except Exception as exc: logger.warning("Football-Data fetch failed: %s (%s)",url,exc); return None
+            r=requests.get(url,timeout=REQUEST_TIMEOUT)
+            if r.status_code == 404:
+                return None, 404
+            r.raise_for_status(); return r.content, r.status_code
+        except Exception as exc: logger.warning("Football-Data fetch failed: %s (%s)",url,exc); return None, None
     def _local_frames(self):
         frames=[]; code_to_key={v["code"]:k for k,v in LEAGUE_CONFIG.items()}
         if not self.raw_dir.exists(): return frames
@@ -58,12 +68,19 @@ class FootballDataProvider:
     def _remote_frames(self):
         frames=[]; now=datetime.now(timezone.utc); season_year=now.year if now.month>=7 else now.year-1
         for league_key,info in LEAGUE_CONFIG.items():
-            data=self._get(f"{BASE_URL}/{self._season_code(season_year)}/{info['code']}.csv")
+            if is_football_data_unavailable(league_key):
+                logger.info("Football-Data unavailable for %s; skipping remote current-season request", league_key)
+                continue
+            url=f"{BASE_URL}/{self._season_code(season_year)}/{info['code']}.csv"
+            data,status=self._get(url)
+            if status == 404:
+                mark_football_data_unavailable(league_key, url, status)
+                continue
             if data:
                 try:
                     df=pd.read_csv(io.BytesIO(data)); df["League"]=league_key; frames.append(df)
                 except Exception as exc: logger.warning("Could not parse current %s: %s",league_key,exc)
-        data=self._get(FIXTURES_URL)
+        data,_status=self._get(FIXTURES_URL)
         if data:
             try: frames.append(pd.read_csv(io.BytesIO(data)))
             except Exception as exc: logger.warning("Could not parse fixture feed: %s",exc)

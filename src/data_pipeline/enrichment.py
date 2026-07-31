@@ -1,8 +1,6 @@
 """Operational enrichments from ClubElo and MET Norway."""
 from __future__ import annotations
 
-import csv
-import io
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -20,23 +18,34 @@ def _team_slug(value: str) -> str:
 
 def refresh_clubelo(store: SupabaseStore | None = None) -> dict[str, Any]:
     store = store or SupabaseStore()
-    response = requests.get("http://api.clubelo.com/", timeout=30)
-    response.raise_for_status()
+    try:
+        import soccerdata as sd  # type: ignore
+    except ImportError:
+        return {"provider": "clubelo", "rows": 0, "skipped": "soccerdata is not installed"}
+
     now = datetime.now(timezone.utc).isoformat()
+    try:
+        frame = sd.ClubElo().read_by_date(now[:10])
+    except Exception as exc:
+        return {"provider": "clubelo", "rows": 0, "skipped": f"ClubElo unavailable through soccerdata: {exc}"}
+
     rows = []
-    for row in csv.DictReader(io.StringIO(response.text)):
-        club = row.get("Club")
-        if not club:
+    for _, row in frame.reset_index().iterrows():
+        club = row.get("Club") or row.get("club") or row.get("team") or row.get("Team")
+        if not club or str(club) == "nan":
             continue
+        elo = row.get("Elo") or row.get("elo")
+        rank = row.get("Rank") or row.get("rank")
+        level = row.get("Level") or row.get("level")
         rows.append({
-            "team_slug": _team_slug(club),
-            "team_name": club,
-            "elo": float(row["Elo"]) if row.get("Elo") else None,
-            "rank": int(row["Rank"]) if row.get("Rank") else None,
-            "country": row.get("Country"),
-            "level": row.get("Level"),
-            "from_date": row.get("From"),
-            "to_date": row.get("To"),
+            "team_slug": _team_slug(str(club)),
+            "team_name": str(club),
+            "elo": float(elo) if elo == elo and elo is not None else None,
+            "rank": int(rank) if rank == rank and rank is not None else None,
+            "country": row.get("Country") or row.get("country"),
+            "level": level if level == level else None,
+            "from_date": row.get("From") or row.get("from"),
+            "to_date": row.get("To") or row.get("to"),
             "updated_at": now,
         })
     store.upsert("team_strength", rows, "team_slug")

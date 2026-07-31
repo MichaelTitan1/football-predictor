@@ -8,13 +8,14 @@ from Git. The canonical production source of truth remains Supabase.
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -45,6 +46,39 @@ REQUIRED_COLS = {"Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"}
 HTTP_TIMEOUT = 30
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+UNAVAILABLE_PATH = RAW_DIR / "football_data_unavailable.json"
+
+
+class FootballDataUnavailableError(RuntimeError):
+    """Raised when football-data.co.uk confirms a league code is unavailable."""
+
+
+def _load_unavailable() -> Dict[str, dict]:
+    if not UNAVAILABLE_PATH.exists():
+        return {}
+    try:
+        return json.loads(UNAVAILABLE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not read %s: %s", UNAVAILABLE_PATH, exc)
+        return {}
+
+
+def is_football_data_unavailable(league_key: str) -> bool:
+    return league_key in _load_unavailable()
+
+
+def mark_football_data_unavailable(league_key: str, url: str | None = None, status_code: int = 404) -> None:
+    data = _load_unavailable()
+    data[league_key] = {
+        "FootballDataUnavailable": True,
+        "status_code": status_code,
+        "url": url,
+        "marked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    UNAVAILABLE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UNAVAILABLE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    logger.info("Football-Data unavailable for %s; future runs will skip it immediately", league_key)
+
 
 
 def _season_code(season_start: int) -> str:
@@ -58,27 +92,35 @@ def _candidate_url(league_key: str, season_start: int) -> Optional[str]:
     return f"https://www.football-data.co.uk/mmz4281/{_season_code(season_start)}/{info['code']}.csv"
 
 
-def _http_get(url: str) -> Optional[bytes]:
+def _http_get(url: str) -> Tuple[Optional[bytes], Optional[int]]:
     last_exc = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             if requests is None:
                 from urllib.request import urlopen
                 with urlopen(url, timeout=HTTP_TIMEOUT) as resp:
-                    if getattr(resp, "status", 200) >= 200:
-                        return resp.read()
-                    last_exc = Exception(f"HTTP {getattr(resp, 'status', 'unknown')}")
+                    status = getattr(resp, "status", 200)
+                    if status == 200:
+                        return resp.read(), status
+                    if status == 404:
+                        return None, status
+                    last_exc = Exception(f"HTTP {status}")
             else:
                 resp = requests.get(url, timeout=HTTP_TIMEOUT)
                 if resp.status_code == 200:
-                    return resp.content
+                    return resp.content, resp.status_code
+                if resp.status_code == 404:
+                    return None, resp.status_code
                 last_exc = Exception(f"HTTP {resp.status_code}")
         except Exception as exc:
+            status = getattr(exc, "code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                return None, status
             last_exc = exc
             logger.debug("Attempt %d failed for %s: %s", attempt, url, exc)
         time.sleep(RETRY_DELAY)
     logger.info("Failed to download %s after %d attempts: %s", url, MAX_RETRIES, last_exc)
-    return None
+    return None, None
 
 
 def _validate_dataframe(df: pd.DataFrame) -> bool:
@@ -114,6 +156,9 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
     if league_key not in ALLOWED_LEAGUES:
         logger.info("League %s is not in allowed list; skipping.", league_key)
         return False
+    if is_football_data_unavailable(league_key):
+        logger.info("Football-Data unavailable for %s; skipping without HTTP requests.", league_key)
+        return False
     if season_start > CURRENT_YEAR:
         logger.info("Season %s is in the future; skipping.", season_start)
         return False
@@ -128,7 +173,10 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
         return True
 
     logger.info("Downloading %s season %s from %s", league_key, season_start, url)
-    data = _http_get(url)
+    data, status_code = _http_get(url)
+    if status_code == 404:
+        mark_football_data_unavailable(league_key, url, status_code)
+        raise FootballDataUnavailableError(f"Football-Data returned 404 for {league_key}")
     if data is None:
         return False
     try:
@@ -154,15 +202,49 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
 def download_all_leagues(start_year: int = START_YEAR, end_year: Optional[int] = None) -> Dict[str, List[int]]:
     if end_year is None:
         end_year = CURRENT_YEAR
+    started_at = time.monotonic()
+    total_seasons = len(ALLOWED_LEAGUES) * (end_year - start_year + 1)
+    completed = downloaded = skipped = unavailable = 0
     results: Dict[str, List[int]] = {}
     for league in ALLOWED_LEAGUES:
         results[league] = []
         for year in range(start_year, end_year + 1):
+            completed += 1
+            remaining = max(total_seasons - completed, 0)
+            elapsed = time.monotonic() - started_at
+            eta_seconds = (elapsed / completed * remaining) if completed else 0
+            logger.info(
+                "Current batch: %s %s | Downloaded=%s Skipped=%s Unavailable=%s Uploaded=%s Remaining=%s Estimated completion=%.1f minutes",
+                league,
+                year,
+                downloaded,
+                skipped,
+                unavailable,
+                downloaded,
+                remaining,
+                eta_seconds / 60,
+            )
             try:
                 if download_season_data(league, year):
                     results[league].append(year)
+                    downloaded += 1
+                else:
+                    skipped += 1
+            except FootballDataUnavailableError:
+                unavailable += 1
+                skipped += end_year - year
+                logger.info("Stopping Football-Data requests for unavailable league %s after %s", league, year)
+                break
             except Exception:
+                skipped += 1
                 logger.exception("Unexpected error downloading %s %s", league, year)
+    logger.info(
+        "Downloaded=%s Skipped=%s Unavailable=%s Uploaded=%s Remaining=0 Estimated completion=0.0 minutes",
+        downloaded,
+        skipped,
+        unavailable,
+        downloaded,
+    )
     return results
 
 

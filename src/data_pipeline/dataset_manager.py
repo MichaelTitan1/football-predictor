@@ -17,7 +17,7 @@ Public functions:
 - dataset_report(merged_df: Optional[pd.DataFrame] = None, processed_path: str = "data/processed/merged_dataset.csv") -> dict
 
 Design goals:
-- Defensive parsing of dates (infer formats, support common football-data date formats)
+- Defensive parsing of dates using explicit football-data date formats
 - Schema alignment via alias mapping for typical column name variants
 - Safe, idempotent merging with duplicate detection and logging
 - Minimal external deps: pandas + standard library
@@ -43,6 +43,7 @@ logger.setLevel(logging.INFO)
 
 # Canonical columns we expect for the downstream pipeline
 _CANONICAL_COLS = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"]
+_FOOTBALL_DATA_DATE_FORMATS = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d")
 
 # Common column name aliases (map variant -> canonical)
 _ALIAS_MAP = {
@@ -61,6 +62,19 @@ _ALIAS_MAP = {
     "Result": "FTR",
     "Date": "Date",
 }
+
+
+def _parse_football_data_dates(series: pd.Series) -> pd.Series:
+    parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    remaining = series.notna()
+    text = series.astype(str).str.strip()
+    for fmt in _FOOTBALL_DATA_DATE_FORMATS:
+        current = pd.to_datetime(text[remaining], format=fmt, errors="coerce")
+        parsed.loc[current.index] = parsed.loc[current.index].fillna(current)
+        remaining = parsed.isna() & series.notna()
+        if not remaining.any():
+            break
+    return parsed
 
 
 def _atomic_write_csv(df: pd.DataFrame, target: Path) -> None:
@@ -89,10 +103,7 @@ def _coerce_standard_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # Date parsing
     if "Date" in df.columns:
-        try:
-            df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce", infer_datetime_format=True)
-        except Exception:
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Date"] = _parse_football_data_dates(df["Date"])
 
     # Goals to numeric
     for g in ["FTHG", "FTAG"]:
@@ -205,7 +216,7 @@ def merge_datasets(data_dir: str = "data/raw", processed_path: str = "data/proce
 
     # Normalize FTR again and drop fully empty date rows
     df_merged["FTR"] = df_merged["FTR"].astype(str).str.strip().str.upper().replace({"NAN": None, "NONE": None})
-    df_merged["Date"] = pd.to_datetime(df_merged["Date"], dayfirst=True, errors="coerce", infer_datetime_format=True)
+    df_merged["Date"] = _parse_football_data_dates(df_merged["Date"])
 
     before = len(df_merged)
     # Drop rows without date or home/away

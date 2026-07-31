@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import requests
 
 from src.data_pipeline.api_football_provider import APIFootballProvider, APIFootballProviderError
 from src.data_pipeline.canonical_data import (
@@ -249,3 +250,190 @@ def test_prediction_service_consumes_team_statistics_before_prediction():
     assert enriched.loc[0, "away_elo_prior"] == 1500.0
     assert enriched.loc[0, "xg_diff"] == 1.2000000000000002
     assert enriched.loc[0, "elo_diff_home_minus_away"] == 200.0
+
+class _FakeSupabaseResponse:
+    status_code = 200
+    text = ""
+
+    def __init__(self, data=None):
+        self._data = data
+        self.content = b"[]" if data is not None else b""
+
+    def json(self):
+        return self._data
+
+
+class _FakeSupabaseSession:
+    def __init__(self, existing=None, fail_match_posts=None):
+        self.existing = existing or {}
+        self.fail_match_posts = set(fail_match_posts or [])
+        self.calls = []
+        self.match_post_calls = 0
+
+    def request(self, method, url, **kwargs):
+        table = url.rstrip("/").split("/")[-1]
+        self.calls.append((method, table, kwargs))
+        if method == "GET" and table == "matches":
+            keys_param = kwargs["params"]["canonical_key"]
+            keys = keys_param.removeprefix("in.(").removesuffix(")").split(",")
+            rows = [
+                {
+                    "canonical_key": key,
+                    "updated_at": self.existing[key][0],
+                    "source_updated_at": self.existing[key][1],
+                }
+                for key in keys
+                if key in self.existing
+            ]
+            return _FakeSupabaseResponse(rows)
+        if method == "POST" and table == "matches":
+            self.match_post_calls += 1
+            if self.match_post_calls in self.fail_match_posts:
+                raise requests.exceptions.ReadTimeout("boom")
+        return _FakeSupabaseResponse()
+
+
+def _matches(count):
+    return [
+        MatchRecord(
+            "provider",
+            "EPL",
+            "2025-2026",
+            f"2026-01-{index + 1:02d}T15:00:00+00:00",
+            f"home-{index}",
+            f"away-{index}",
+            source_id=f"source-{index}",
+        )
+        for index in range(count)
+    ]
+
+
+def test_supabase_snapshot_uploads_matches_in_batches(monkeypatch):
+    from src.data_pipeline.supabase_store import SupabaseStore
+
+    monkeypatch.setenv("FOVRA_SUPABASE_BATCH_SIZE", "2")
+    monkeypatch.setenv("FOVRA_SUPABASE_BATCH_RETRIES", "0")
+    session = _FakeSupabaseSession()
+    store = SupabaseStore("https://example.supabase.co", "key", session=session)
+
+    uploaded = store.upsert_snapshot([], [], _matches(5), "provider", "2026-07-31T00:00:00+00:00")
+
+    assert uploaded == 5
+    match_posts = [call for call in session.calls if call[0] == "POST" and call[1] == "matches"]
+    assert [len(call[2]["json"]) for call in match_posts] == [2, 2, 1]
+    assert all(call[2]["timeout"] == 300 for call in session.calls)
+
+
+def test_supabase_snapshot_resume_skips_prior_batches(monkeypatch):
+    from src.data_pipeline.supabase_store import SupabaseStore
+
+    monkeypatch.setenv("FOVRA_SUPABASE_BATCH_SIZE", "2")
+    monkeypatch.setenv("FOVRA_SUPABASE_MATCH_BATCH_START", "2")
+    session = _FakeSupabaseSession()
+    store = SupabaseStore("https://example.supabase.co", "key", session=session)
+
+    uploaded = store.upsert_snapshot([], [], _matches(5), "provider", "2026-07-31T00:00:00+00:00")
+
+    assert uploaded == 3
+    match_posts = [call for call in session.calls if call[0] == "POST" and call[1] == "matches"]
+    assert [len(call[2]["json"]) for call in match_posts] == [2, 1]
+
+
+def test_supabase_snapshot_skips_unchanged_rows(monkeypatch):
+    from src.data_pipeline.supabase_store import SupabaseStore
+
+    fetched_at = "2026-07-31T00:00:00+00:00"
+    rows = _matches(3)
+    unchanged_key = rows[1].match_key
+    monkeypatch.setenv("FOVRA_SUPABASE_BATCH_SIZE", "3")
+    session = _FakeSupabaseSession(existing={unchanged_key: (fetched_at, fetched_at)})
+    store = SupabaseStore("https://example.supabase.co", "key", session=session)
+
+    uploaded = store.upsert_snapshot([], [], rows, "provider", fetched_at)
+
+    assert uploaded == 2
+    match_posts = [call for call in session.calls if call[0] == "POST" and call[1] == "matches"]
+    assert len(match_posts) == 1
+    assert [row["canonical_key"] for row in match_posts[0][2]["json"]] == [rows[0].match_key, rows[2].match_key]
+
+
+def test_supabase_snapshot_retries_failed_batch_then_continues(monkeypatch):
+    from src.data_pipeline.supabase_store import SupabaseStore
+
+    monkeypatch.setenv("FOVRA_SUPABASE_BATCH_SIZE", "2")
+    monkeypatch.setenv("FOVRA_SUPABASE_BATCH_RETRIES", "1")
+    monkeypatch.setattr("src.data_pipeline.supabase_store.time.sleep", lambda _: None)
+    session = _FakeSupabaseSession(fail_match_posts={1, 3, 4})
+    store = SupabaseStore("https://example.supabase.co", "key", session=session)
+
+    uploaded = store.upsert_snapshot([], [], _matches(5), "provider", "2026-07-31T00:00:00+00:00")
+
+    assert uploaded == 3
+    match_posts = [call for call in session.calls if call[0] == "POST" and call[1] == "matches"]
+    assert [len(call[2]["json"]) for call in match_posts] == [2, 2, 2, 2, 1]
+
+
+def test_football_data_404_marks_league_unavailable_and_stops(monkeypatch, tmp_path):
+    from src.data_pipeline import data_downloader
+
+    class Response404:
+        status_code = 404
+        content = b""
+
+    calls = []
+    monkeypatch.setattr(data_downloader, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(data_downloader, "UNAVAILABLE_PATH", tmp_path / "football_data_unavailable.json")
+    monkeypatch.setattr(data_downloader, "ALLOWED_LEAGUES", ["EPL"])
+    monkeypatch.setattr(data_downloader.time, "sleep", lambda _: None)
+    monkeypatch.setattr(data_downloader.requests, "get", lambda url, timeout: calls.append(url) or Response404())
+
+    result = data_downloader.download_all_leagues(2010, 2012)
+
+    assert result["EPL"] == []
+    assert len(calls) == 1
+    assert data_downloader.is_football_data_unavailable("EPL")
+
+
+def test_football_data_unavailable_league_skips_without_http(monkeypatch, tmp_path):
+    from src.data_pipeline import data_downloader
+
+    monkeypatch.setattr(data_downloader, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(data_downloader, "UNAVAILABLE_PATH", tmp_path / "football_data_unavailable.json")
+    data_downloader.mark_football_data_unavailable("EPL", "https://example.test/E0.csv")
+    monkeypatch.setattr(data_downloader.requests, "get", lambda *_, **__: (_ for _ in ()).throw(AssertionError("HTTP should not be called")))
+
+    assert data_downloader.download_season_data("EPL", 2011) is False
+
+
+def test_fbref_mapping_uses_soccerdata_available_league_ids():
+    from src.data_pipeline.league_config import LeagueConfig
+    from src.data_pipeline.soccerdata_provider import _resolve_soccerdata_league
+
+    class FakeFBref:
+        @staticmethod
+        def available_leagues():
+            return ["ENG-Premier League", "ESP-La Liga"]
+
+    class FakeSoccerData:
+        FBref = FakeFBref
+
+    league = LeagueConfig("EPL", "Premier League", 1, fbref_name="Premier League")
+
+    assert _resolve_soccerdata_league(FakeSoccerData, "FBref", league) == "ENG-Premier League"
+
+
+def test_fbref_unsupported_league_returns_none():
+    from src.data_pipeline.league_config import LeagueConfig
+    from src.data_pipeline.soccerdata_provider import _resolve_soccerdata_league
+
+    class FakeFBref:
+        @staticmethod
+        def available_leagues():
+            return ["ENG-Premier League"]
+
+    class FakeSoccerData:
+        FBref = FakeFBref
+
+    league = LeagueConfig("MLS", "Major League Soccer", 1, fbref_name="Major League Soccer")
+
+    assert _resolve_soccerdata_league(FakeSoccerData, "FBref", league) is None
