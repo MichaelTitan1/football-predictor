@@ -372,7 +372,6 @@ def test_supabase_snapshot_retries_failed_batch_then_continues(monkeypatch):
     match_posts = [call for call in session.calls if call[0] == "POST" and call[1] == "matches"]
     assert [len(call[2]["json"]) for call in match_posts] == [2, 2, 2, 2, 1]
 
-
 def test_football_data_404_marks_league_unavailable_and_stops(monkeypatch, tmp_path):
     from src.data_pipeline import data_downloader
 
