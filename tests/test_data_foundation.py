@@ -250,7 +250,6 @@ def test_prediction_service_consumes_team_statistics_before_prediction():
     assert enriched.loc[0, "xg_diff"] == 1.2000000000000002
     assert enriched.loc[0, "elo_diff_home_minus_away"] == 200.0
 
-
 def test_football_data_permanent_404_is_provider_unavailable_without_retries(monkeypatch):
     from src.data_pipeline import data_downloader
 
