@@ -2,8 +2,8 @@ name: Fovra data update
 
 on:
   schedule:
-    # Complete free-provider refresh every 6 hours.
-    - cron: '10 */6 * * *'
+    # Football-Data refresh cadence: Monday and Thursday at 01:00 UTC.
+    - cron: '0 1 * * 1,4'
   workflow_dispatch:
     inputs:
       task:
@@ -11,7 +11,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, football-data, fbref, clubelo, weather, features, predictions, results, bootstrap-historical]
+        options: [all, football-data, clubelo, weather, features, predictions, results, bootstrap-historical]
 
 jobs:
   update:
@@ -45,32 +45,29 @@ jobs:
           python -m src.data_pipeline.data_downloader --bootstrap
           python -m src.data_pipeline.prepare_merged_dataset
 
+      - name: Verify Neon PostgreSQL connectivity
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'weather' || steps.task.outputs.task == 'predictions'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -c "from src.data_pipeline.neon_store import NeonStore; store=NeonStore(); store.verify_connection(); print('Neon SELECT 1 succeeded')"
+
       - name: Upsert Football-Data canonical matches and resolve completed results
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results'
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m src.data_pipeline.update_canonical --source football-data
 
-      - name: Refresh Soccerdata FBref team statistics
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'fbref'
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python -c "from src.data_pipeline.soccerdata_provider import refresh_fbref_team_stats; print(refresh_fbref_team_stats())"
 
       - name: Refresh ClubElo team strength
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo'
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
 
       - name: Refresh MET Norway weather
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'weather'
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           MET_NORWAY_USER_AGENT: ${{ vars.MET_NORWAY_USER_AGENT }}
         run: python -c "from src.data_pipeline.enrichment import refresh_weather; print(refresh_weather())"
 
@@ -81,8 +78,7 @@ jobs:
       - name: Generate and archive Match Winner 1X2 predictions
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'predictions'
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FOOTBALL_MODEL_PATH: models/football_model.cbm
           FOOTBALL_CALIBRATION_PATH: models/football_model_confidence.joblib
         run: python -m src.prediction.generate_predictions

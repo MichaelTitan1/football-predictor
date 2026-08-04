@@ -18,8 +18,8 @@ class LeagueConfig:
     api_football_id: int | None = None
     country: str = ""
     strength: float = 1.0
-    fbref_name: str | None = None
     clubelo_country: str | None = None
+    football_data_source_type: str = "season"
 
 @lru_cache(maxsize=1)
 def load_enabled_leagues(path: str | Path = CONFIG_PATH) -> tuple[LeagueConfig, ...]:
@@ -41,8 +41,8 @@ def league_config_map() -> dict[str, dict[str, Any]]:
             "strength": l.strength,
             "api_football_id": l.api_football_id,
             "country": l.country,
-            "fbref_name": l.fbref_name or l.name,
             "clubelo_country": l.clubelo_country,
+            "source_type": l.football_data_source_type,
         }
         for l in load_enabled_leagues()
     }

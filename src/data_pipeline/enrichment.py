@@ -9,15 +9,15 @@ from typing import Any
 import requests
 
 from api.repository import FovraRepository
-from .supabase_store import SupabaseStore
+from .neon_store import NeonStore
 
 
 def _team_slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
 
 
-def refresh_clubelo(store: SupabaseStore | None = None) -> dict[str, Any]:
-    store = store or SupabaseStore()
+def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
+    store = store or NeonStore()
     try:
         import soccerdata as sd  # type: ignore
     except ImportError:
@@ -52,8 +52,8 @@ def refresh_clubelo(store: SupabaseStore | None = None) -> dict[str, Any]:
     return {"provider": "clubelo", "rows": len(rows), "updated_at": now}
 
 
-def refresh_weather(store: SupabaseStore | None = None, limit: int = 200) -> dict[str, Any]:
-    store = store or SupabaseStore()
+def refresh_weather(store: NeonStore | None = None, limit: int = 200) -> dict[str, Any]:
+    store = store or NeonStore()
     repo = FovraRepository(store)
     now = datetime.now(timezone.utc)
     fixtures = repo._select("matches", params={
