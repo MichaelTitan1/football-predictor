@@ -16,6 +16,7 @@ from .providers import ProviderSnapshot
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://www.football-data.co.uk/mmz4281"
+NEW_URL = "https://www.football-data.co.uk/new"
 FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 REQUEST_TIMEOUT = 30
 
@@ -68,13 +69,13 @@ class FootballDataProvider:
     def _remote_frames(self):
         frames=[]; now=datetime.now(timezone.utc); season_year=now.year if now.month>=7 else now.year-1
         for league_key,info in LEAGUE_CONFIG.items():
-            if is_football_data_unavailable(league_key):
+            if is_football_data_unavailable(league_key, season_year):
                 logger.info("Football-Data unavailable for %s; skipping remote current-season request", league_key)
                 continue
-            url=f"{BASE_URL}/{self._season_code(season_year)}/{info['code']}.csv"
+            url = f"{NEW_URL}/{info['code']}.csv" if info.get("source_type") == "single" else f"{BASE_URL}/{self._season_code(season_year)}/{info['code']}.csv"
             data,status=self._get(url)
             if status == 404:
-                mark_football_data_unavailable(league_key, url, status)
+                mark_football_data_unavailable(league_key, url, status, season_year)
                 continue
             if data:
                 try:

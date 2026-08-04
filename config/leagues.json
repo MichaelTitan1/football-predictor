@@ -1,28 +1,346 @@
 {
   "enabled_leagues": [
-    {"key":"EPL","name":"Premier League","tier":1,"football_data_code":"E0","api_football_id":39,"country":"England","fbref_name":"ENG-Premier League","clubelo_country":"ENG"},
-    {"key":"Championship","name":"Championship","tier":2,"football_data_code":"E1","api_football_id":40,"country":"England","fbref_name":"Championship","clubelo_country":"ENG"},
-    {"key":"LeagueOne","name":"League One","tier":3,"football_data_code":"E2","api_football_id":41,"country":"England","fbref_name":"League One","clubelo_country":"ENG"},
-    {"key":"LeagueTwo","name":"League Two","tier":4,"football_data_code":"E3","api_football_id":42,"country":"England","fbref_name":"League Two","clubelo_country":"ENG"},
-    {"key":"NationalLeague","name":"National League","tier":5,"football_data_code":"E4","api_football_id":43,"country":"England","fbref_name":"National League","clubelo_country":"ENG"},
-    {"key":"ScottishPremiership","name":"Premiership","tier":1,"football_data_code":"SC0","api_football_id":179,"country":"Scotland","fbref_name":"Scottish Premiership","clubelo_country":"SCO"},
-    {"key":"LaLiga","name":"La Liga","tier":1,"football_data_code":"SP1","api_football_id":140,"country":"Spain","fbref_name":"ESP-La Liga","clubelo_country":"ESP"},
-    {"key":"SegundaDivision","name":"Segunda División","tier":2,"football_data_code":"SP2","api_football_id":141,"country":"Spain","fbref_name":"Segunda División","clubelo_country":"ESP"},
-    {"key":"Bundesliga","name":"Bundesliga","tier":1,"football_data_code":"D1","api_football_id":78,"country":"Germany","fbref_name":"GER-Bundesliga","clubelo_country":"GER"},
-    {"key":"Bundesliga2","name":"2. Bundesliga","tier":2,"football_data_code":"D2","api_football_id":79,"country":"Germany","fbref_name":"2. Bundesliga","clubelo_country":"GER"},
-    {"key":"SerieA","name":"Serie A","tier":1,"football_data_code":"I1","api_football_id":135,"country":"Italy","fbref_name":"ITA-Serie A","clubelo_country":"ITA"},
-    {"key":"SerieB","name":"Serie B","tier":2,"football_data_code":"I2","api_football_id":136,"country":"Italy","fbref_name":"Serie B","clubelo_country":"ITA"},
-    {"key":"Ligue1","name":"Ligue 1","tier":1,"football_data_code":"F1","api_football_id":61,"country":"France","fbref_name":"FRA-Ligue 1","clubelo_country":"FRA"},
-    {"key":"Ligue2","name":"Ligue 2","tier":2,"football_data_code":"F2","api_football_id":62,"country":"France","fbref_name":"Ligue 2","clubelo_country":"FRA"},
-    {"key":"Eredivisie","name":"Eredivisie","tier":1,"football_data_code":"N1","api_football_id":88,"country":"Netherlands","fbref_name":"Eredivisie","clubelo_country":"NED"},
-    {"key":"BelgianProLeague","name":"Pro League","tier":1,"football_data_code":"B1","api_football_id":144,"country":"Belgium","fbref_name":"Belgian Pro League","clubelo_country":"BEL"},
-    {"key":"PrimeiraLiga","name":"Primeira Liga","tier":1,"football_data_code":"P1","api_football_id":94,"country":"Portugal","fbref_name":"Primeira Liga","clubelo_country":"POR"},
-    {"key":"SuperLig","name":"Süper Lig","tier":1,"football_data_code":"T1","api_football_id":203,"country":"Turkey","fbref_name":"Süper Lig","clubelo_country":"TUR"},
-    {"key":"ArgLigaProfesional","name":"Liga Profesional","tier":1,"football_data_code":"ARG","api_football_id":128,"country":"Argentina","fbref_name":"Liga Profesional Argentina"},
-    {"key":"BrasileiraoSerieA","name":"Brasileirão Série A","tier":1,"football_data_code":"BRA","api_football_id":71,"country":"Brazil","fbref_name":"Série A"},
-    {"key":"DanishSuperliga","name":"Superliga","tier":1,"football_data_code":"DNK","api_football_id":119,"country":"Denmark","fbref_name":"Danish Superliga","clubelo_country":"DEN"},
-    {"key":"Eliteserien","name":"Eliteserien","tier":1,"football_data_code":"NOR","api_football_id":103,"country":"Norway","fbref_name":"Eliteserien","clubelo_country":"NOR"},
-    {"key":"Allsvenskan","name":"Allsvenskan","tier":1,"football_data_code":"SWE","api_football_id":113,"country":"Sweden","fbref_name":"Allsvenskan","clubelo_country":"SWE"},
-    {"key":"MLS","name":"Major League Soccer","tier":1,"football_data_code":"USA","api_football_id":253,"country":"United States","fbref_name":"Major League Soccer"}
+    {
+      "key": "E0",
+      "name": "E0",
+      "tier": 1,
+      "football_data_code": "E0",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "E1",
+      "name": "E1",
+      "tier": 1,
+      "football_data_code": "E1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "E2",
+      "name": "E2",
+      "tier": 1,
+      "football_data_code": "E2",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "E3",
+      "name": "E3",
+      "tier": 1,
+      "football_data_code": "E3",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "EC",
+      "name": "EC",
+      "tier": 1,
+      "football_data_code": "EC",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "SC0",
+      "name": "SC0",
+      "tier": 1,
+      "football_data_code": "SC0",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "SC1",
+      "name": "SC1",
+      "tier": 1,
+      "football_data_code": "SC1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "SC2",
+      "name": "SC2",
+      "tier": 1,
+      "football_data_code": "SC2",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "SC3",
+      "name": "SC3",
+      "tier": 1,
+      "football_data_code": "SC3",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "D1",
+      "name": "D1",
+      "tier": 1,
+      "football_data_code": "D1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "D2",
+      "name": "D2",
+      "tier": 1,
+      "football_data_code": "D2",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "I1",
+      "name": "I1",
+      "tier": 1,
+      "football_data_code": "I1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "I2",
+      "name": "I2",
+      "tier": 1,
+      "football_data_code": "I2",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "SP1",
+      "name": "SP1",
+      "tier": 1,
+      "football_data_code": "SP1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "SP2",
+      "name": "SP2",
+      "tier": 1,
+      "football_data_code": "SP2",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "F1",
+      "name": "F1",
+      "tier": 1,
+      "football_data_code": "F1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "F2",
+      "name": "F2",
+      "tier": 1,
+      "football_data_code": "F2",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "N1",
+      "name": "N1",
+      "tier": 1,
+      "football_data_code": "N1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "B1",
+      "name": "B1",
+      "tier": 1,
+      "football_data_code": "B1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "P1",
+      "name": "P1",
+      "tier": 1,
+      "football_data_code": "P1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "T1",
+      "name": "T1",
+      "tier": 1,
+      "football_data_code": "T1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "G1",
+      "name": "G1",
+      "tier": 1,
+      "football_data_code": "G1",
+      "football_data_source_type": "season",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "ARG",
+      "name": "ARG",
+      "tier": 1,
+      "football_data_code": "ARG",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "AUT",
+      "name": "AUT",
+      "tier": 1,
+      "football_data_code": "AUT",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "BRA",
+      "name": "BRA",
+      "tier": 1,
+      "football_data_code": "BRA",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "CHN",
+      "name": "CHN",
+      "tier": 1,
+      "football_data_code": "CHN",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "DNK",
+      "name": "DNK",
+      "tier": 1,
+      "football_data_code": "DNK",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "FIN",
+      "name": "FIN",
+      "tier": 1,
+      "football_data_code": "FIN",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "IRL",
+      "name": "IRL",
+      "tier": 1,
+      "football_data_code": "IRL",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "JPN",
+      "name": "JPN",
+      "tier": 1,
+      "football_data_code": "JPN",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "MEX",
+      "name": "MEX",
+      "tier": 1,
+      "football_data_code": "MEX",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "NOR",
+      "name": "NOR",
+      "tier": 1,
+      "football_data_code": "NOR",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "POL",
+      "name": "POL",
+      "tier": 1,
+      "football_data_code": "POL",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "ROU",
+      "name": "ROU",
+      "tier": 1,
+      "football_data_code": "ROU",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "RUS",
+      "name": "RUS",
+      "tier": 1,
+      "football_data_code": "RUS",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "SWE",
+      "name": "SWE",
+      "tier": 1,
+      "football_data_code": "SWE",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "SWZ",
+      "name": "SWZ",
+      "tier": 1,
+      "football_data_code": "SWZ",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    },
+    {
+      "key": "USA",
+      "name": "USA",
+      "tier": 1,
+      "football_data_code": "USA",
+      "football_data_source_type": "single",
+      "api_football_id": null,
+      "country": ""
+    }
   ]
 }

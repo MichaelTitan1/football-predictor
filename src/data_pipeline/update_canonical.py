@@ -6,7 +6,7 @@ Production:
 Local-only validation/testing:
     python -m src.data_pipeline.update_canonical --sqlite-local --offline
 
-The production source of truth is the existing Supabase PostgreSQL project.
+The production source of truth is the existing Neon PostgreSQL project.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from .canonical_data import connect, initialize, upsert_records
 from .api_football_provider import APIFootballProvider
 from .football_data_provider import FootballDataProvider
-from .supabase_store import SupabaseStore
+from .neon_store import NeonStore
 
 
 logger = logging.getLogger(__name__)
@@ -91,9 +91,9 @@ def run(
             conn.close()
 
 
-    logger.info("FOVRA: connecting to Supabase")
+    logger.info("FOVRA: connecting to Neon PostgreSQL")
 
-    store = SupabaseStore()
+    store = NeonStore()
 
     logger.info("FOVRA: recording ingestion start")
 
@@ -104,7 +104,7 @@ def run(
 
     try:
         logger.info(
-            "FOVRA: starting Supabase canonical upsert"
+            "FOVRA: starting Neon canonical upsert"
         )
 
         upserted = store.upsert_snapshot(
@@ -116,7 +116,7 @@ def run(
         )
 
         logger.info(
-            "FOVRA: Supabase upsert complete: %s records",
+            "FOVRA: Neon upsert complete: %s records",
             upserted,
         )
 
@@ -124,7 +124,7 @@ def run(
         for canonical_key, metadata in getattr(provider, "match_metadata", {}).items():
             clean = {k: v for k, v in metadata.items() if v is not None}
             if clean:
-                store._request("PATCH", "matches", params={"canonical_key": f"eq.{canonical_key}"}, payload=clean)
+                store.update("matches", clean, "canonical_key = %s", (canonical_key,))
                 venue_updates += 1
 
         logger.info(
@@ -141,30 +141,7 @@ def run(
         )
 
 
-        store._request(
-            "PATCH",
-            "data_sources",
-            params={
-                "provider_key": f"eq.{snapshot.provider}"
-            },
-            payload={
-                "last_attempt_at": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-
-                "last_success_at": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-
-                "last_data_at": snapshot.fetched_at,
-
-                "last_success_rows": len(
-                    snapshot.matches
-                ),
-
-                "last_error": None,
-            },
-        )
+        store.upsert("data_sources", [{"provider_key": snapshot.provider, "display_name": snapshot.provider, "last_attempt_at": datetime.now(timezone.utc).isoformat(), "last_success_at": datetime.now(timezone.utc).isoformat(), "last_data_at": snapshot.fetched_at, "last_success_rows": len(snapshot.matches), "last_error": None}], "provider_key")
 
 
         store.record_ingestion_finish(
@@ -190,7 +167,7 @@ def run(
             "api_football_requests": getattr(provider, "request_count", None),
             "prediction_results_resolved": resolved,
             "newest_match_at": newest,
-            "storage": "supabase-postgresql",
+            "storage": "neon-postgresql",
             "offline": offline,
         }
 
@@ -213,20 +190,7 @@ def run(
             )
 
 
-            store._request(
-                "PATCH",
-                "data_sources",
-                params={
-                    "provider_key": f"eq.{snapshot.provider}"
-                },
-                payload={
-                    "last_attempt_at": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-
-                    "last_error": str(exc)[:2000],
-                },
-            )
+            store.upsert("data_sources", [{"provider_key": snapshot.provider, "display_name": snapshot.provider, "last_attempt_at": datetime.now(timezone.utc).isoformat(), "last_error": str(exc)[:2000]}], "provider_key")
 
 
         except Exception:

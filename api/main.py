@@ -1,6 +1,6 @@
 """Fovra V1 FastAPI API.
 
-The API reads persisted canonical data and predictions from Supabase. It never
+The API reads persisted canonical data and predictions from Neon. It never
 fetches football data on frontend requests and never exposes the service key.
 """
 from __future__ import annotations
