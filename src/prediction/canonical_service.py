@@ -20,11 +20,11 @@ from data_loader import load_all_data
 from src.features.feature_engineer import build_features
 from src.models.calibration import ConfidenceEstimator
 from src.prediction.engine import load_prediction_model, prepare_match_features
-from src.data_pipeline.supabase_store import SupabaseStore
+from src.data_pipeline.neon_store import NeonStore
 
 
 class CanonicalPredictionService:
-    def __init__(self, model_path: str | None = None, calibration_path: str | None = None, store: SupabaseStore | None = None):
+    def __init__(self, model_path: str | None = None, calibration_path: str | None = None, store: NeonStore | None = None):
         self.model_path = model_path or os.getenv("FOOTBALL_MODEL_PATH", "models/football_model.cbm")
         self.calibration_path = calibration_path or os.getenv("FOOTBALL_CALIBRATION_PATH", "models/football_model_confidence.joblib")
         self.model_version = os.getenv("FOOTBALL_MODEL_VERSION", "catboost-v1-existing")
@@ -44,10 +44,10 @@ class CanonicalPredictionService:
     def _team_slug(team_key: str) -> str:
         return str(team_key).split(":", 1)[-1]
 
-    def _select_one(self, table: str, params: dict[str, str]) -> dict[str, Any] | None:
+    def _select_one(self, table: str, where: str, values: tuple[Any, ...], order: str = "") -> dict[str, Any] | None:
         if self.store is None:
             return None
-        rows = self.store._request("GET", table, params={**params, "limit": "1"}) or []
+        rows = self.store.select(table, where, values, order=order, limit=1)
         return rows[0] if rows else None
 
     def context_for_match(self, match: dict[str, Any]) -> dict[str, Any]:
@@ -57,11 +57,11 @@ class CanonicalPredictionService:
         away_slug = self._team_slug(str(match.get("away_team_canonical_key") or ""))
         return {
             "match_id": match.get("source_match_id") or match.get("canonical_key"),
-            "weather": self._select_one("match_weather", {"match_canonical_key": f"eq.{match.get('canonical_key')}"}),
-            "home_team_statistics": self._select_one("team_statistics", {"league_canonical_key": f"eq.{league}", "team_slug": f"eq.{home_slug}", "order": "season.desc"}),
-            "away_team_statistics": self._select_one("team_statistics", {"league_canonical_key": f"eq.{league}", "team_slug": f"eq.{away_slug}", "order": "season.desc"}),
-            "home_team_strength": self._select_one("team_strength", {"team_slug": f"eq.{home_slug}"}),
-            "away_team_strength": self._select_one("team_strength", {"team_slug": f"eq.{away_slug}"}),
+            "weather": self._select_one("match_weather", "match_canonical_key = %s", (match.get("canonical_key"),)),
+            "home_team_statistics": self._select_one("team_statistics", "league_canonical_key = %s and team_slug = %s", (league, home_slug), "season desc"),
+            "away_team_statistics": self._select_one("team_statistics", "league_canonical_key = %s and team_slug = %s", (league, away_slug), "season desc"),
+            "home_team_strength": self._select_one("team_strength", "team_slug = %s", (home_slug,)),
+            "away_team_strength": self._select_one("team_strength", "team_slug = %s", (away_slug,)),
         }
 
     @staticmethod
@@ -114,7 +114,7 @@ class CanonicalPredictionService:
         away_form = {k: feature_values.get(k) for k in ("away_form_short", "away_form_long") if k in feature_values}
         return {"home_team":home_team,"away_team":away_team,"probabilities":{"H":float(probs[0]),"D":float(probs[1]),"A":float(probs[2])},"selected_prediction":selected,"confidence":confidence,"model_version":self.model_version,"model_artifact_hash":self.artifact_hash,"feature_schema_version":self.feature_schema_version,"calibration_method":getattr(self.calibrator,"method",None),"data_freshness_at":str(self.feature_data["Date"].max()) if "Date" in self.feature_data.columns else None,"predicted_at":datetime.now(timezone.utc).isoformat(),"feature_values":feature_values,"home_elo":feature_values.get("home_elo_prior"),"away_elo":feature_values.get("away_elo_prior"),"home_xg":feature_values.get("expected_home_xg"),"away_xg":feature_values.get("expected_away_xg"),"home_form":home_form,"away_form":away_form,"weather":context.get("weather"),"match_id":context.get("match_id")}
 
-    def archive(self, match_canonical_key: str, result: dict[str, Any], store: SupabaseStore) -> None:
+    def archive(self, match_canonical_key: str, result: dict[str, Any], store: NeonStore) -> None:
         probs = result["probabilities"]; predicted_at=result["predicted_at"]
         prediction_key=hashlib.sha256(f"{match_canonical_key}|{predicted_at}|{result['model_version']}".encode()).hexdigest()
         archive_row={"prediction_key":prediction_key,"match_id":result.get("match_id") or match_canonical_key,"match_canonical_key":match_canonical_key,"predicted_at":predicted_at,"model_version":result["model_version"],"model_artifact_hash":result["model_artifact_hash"],"feature_schema_version":result["feature_schema_version"],"home_probability":probs["H"],"draw_probability":probs["D"],"away_probability":probs["A"],"selected_prediction":result["selected_prediction"],"confidence":result["confidence"],"home_elo":result.get("home_elo"),"away_elo":result.get("away_elo"),"home_xg":result.get("home_xg"),"away_xg":result.get("away_xg"),"home_form":result.get("home_form"),"away_form":result.get("away_form"),"weather":result.get("weather"),"feature_values":result.get("feature_values")}

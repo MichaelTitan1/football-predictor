@@ -1,6 +1,6 @@
 """Provider-independent canonical football records.
 
-Production persistence is Supabase PostgreSQL. SQLite support in this module is
+Production persistence is Neon PostgreSQL. SQLite support in this module is
 only for isolated local testing and is never the production source of truth.
 """
 from __future__ import annotations

@@ -8,13 +8,13 @@ import json
 from datetime import datetime, timezone
 
 from api.repository import FovraRepository
-from src.data_pipeline.supabase_store import SupabaseStore
+from src.data_pipeline.neon_store import NeonStore
 from src.prediction.canonical_service import CanonicalPredictionService
 
 
 def run(limit: int = 100) -> dict:
     repo = FovraRepository()
-    store = SupabaseStore()
+    store = NeonStore()
     service = CanonicalPredictionService(store=store)
     metadata = service.metadata()
     store.upsert("model_versions", [{**metadata, "is_active": True}], "version")

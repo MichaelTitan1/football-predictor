@@ -11,3 +11,5 @@ uvicorn[standard]>=0.34
 pytest>=8.0
 python-dotenv>=1.0
 soccerdata>=1.8
+
+psycopg[binary]>=3.2
