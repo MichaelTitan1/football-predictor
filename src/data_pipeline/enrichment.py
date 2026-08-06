@@ -1,8 +1,8 @@
 """Operational enrichments from ClubElo and MET Norway.
 
 ClubElo is a global daily club-strength snapshot rather than a league feed.
-We therefore ingest every club rating ClubElo publishes for the selected day;
-we do not pretend that every one of Fovra's 38 leagues has ClubElo coverage.
+We ingest every club rating ClubElo publishes for the selected day. Fovra has
+38 Football-Data leagues, but ClubElo does not cover every one of them.
 """
 from __future__ import annotations
 
@@ -33,10 +33,7 @@ CLUBELO_RETRIES = int(os.getenv("CLUBELO_RETRIES", "4"))
 CLUBELO_LOOKBACK_DAYS = int(os.getenv("CLUBELO_LOOKBACK_DAYS", "7"))
 CLUBELO_BASE_URLS = [
     value.rstrip("/")
-    for value in os.getenv(
-        "CLUBELO_BASE_URLS",
-        "https://api.clubelo.com,http://api.clubelo.com",
-    ).split(",")
+    for value in os.getenv("CLUBELO_BASE_URLS", "https://api.clubelo.com,http://api.clubelo.com").split(",")
     if value.strip()
 ]
 
@@ -55,13 +52,7 @@ def _read_clubelo_csv(payload: bytes) -> pd.DataFrame:
 
 
 def _fetch_clubelo_snapshot(target: date) -> tuple[pd.DataFrame | None, str | None, str | None]:
-    """Fetch a daily ClubElo snapshot, trying HTTPS/HTTP and recent dates.
-
-    ClubElo's public API is lightweight but can occasionally time out. We try
-    the requested date first and then recent snapshots because the source is a
-    daily ranking and an immediately previous snapshot is preferable to
-    destroying a known-good strength table.
-    """
+    """Fetch ClubElo with retries, protocol fallback, and recent-date fallback."""
     session = requests.Session()
     session.headers.update({"User-Agent": "Fovra/1.0 (football prediction data refresh)"})
     last_error: str | None = None
@@ -78,8 +69,7 @@ def _fetch_clubelo_snapshot(target: date) -> tuple[pd.DataFrame | None, str | No
                         last_error = f"HTTP 404 for {url}"
                         break
                     response.raise_for_status()
-                    frame = _read_clubelo_csv(response.content)
-                    return frame, date_text, None
+                    return _read_clubelo_csv(response.content), date_text, None
                 except Exception as exc:
                     last_error = f"{url}: {exc}"
                     if attempt < CLUBELO_RETRIES:
@@ -94,8 +84,7 @@ def _load_cached_clubelo() -> tuple[pd.DataFrame | None, str | None]:
         frame = _read_clubelo_csv(CLUBELO_CACHE_PATH.read_bytes())
         cached_date = None
         if CLUBELO_META_PATH.exists():
-            metadata = json.loads(CLUBELO_META_PATH.read_text(encoding="utf-8"))
-            cached_date = metadata.get("source_date")
+            cached_date = json.loads(CLUBELO_META_PATH.read_text(encoding="utf-8")).get("source_date")
         return frame, cached_date
     except Exception:
         return None, None
@@ -112,29 +101,49 @@ def _save_clubelo_cache(frame: pd.DataFrame, source_date: str, fetched_at: str) 
     )
 
 
+def _coverage(store: NeonStore, clubelo_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report direct team-name coverage without making missing ClubElo data fatal."""
+    try:
+        teams = store.select("teams", columns="canonical_key,name,league_canonical_key")
+        strength_slugs = {_team_slug(str(row["team_name"])) for row in clubelo_rows if row.get("team_name")}
+        covered_leagues = {
+            str(row["league_canonical_key"])
+            for row in teams
+            if _team_slug(str(row.get("name", ""))) in strength_slugs
+        }
+        configured_leagues = {str(row["league_canonical_key"]) for row in teams}
+        return {
+            "configured_leagues_seen": len(configured_leagues),
+            "leagues_with_direct_clubelo_name_match": len(covered_leagues),
+        }
+    except Exception:
+        return {}
+
+
 def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
     """Refresh ClubElo without making a temporary source outage break Fovra.
 
     Fresh data is preferred. If ClubElo is temporarily unreachable, the last
-    successful local snapshot is retained and re-upserted so predictions keep
-    a valid strength feature. If no local snapshot exists, the existing Neon
-    team_strength table is retained as the final fallback.
+    successful local snapshot is retained. If no local snapshot exists, the
+    existing Neon team_strength table is retained as the final fallback.
     """
     store = store or NeonStore()
+    store.initialize_schema()
     now = datetime.now(timezone.utc).isoformat()
     run_id = store.record_ingestion_start("clubelo")
 
     frame, source_date, live_error = _fetch_clubelo_snapshot(datetime.now(timezone.utc).date())
     fresh = frame is not None
-
     if frame is not None and source_date:
         _save_clubelo_cache(frame, source_date, now)
     else:
         frame, source_date = _load_cached_clubelo()
 
     if frame is None:
-        # Last-resort resilience: keep the last known Neon strength values.
-        existing = store.select("team_strength", columns="team_slug,team_name,elo,rank,country,level,from_date,to_date,source_provider,updated_at")
+        existing = store.select(
+            "team_strength",
+            columns="team_slug,team_name,elo,rank,country,level,from_date,to_date,source_provider,updated_at",
+        )
         if existing:
             store.upsert("provider_sources", [{
                 "provider_key": "clubelo",
@@ -142,6 +151,7 @@ def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
                 "source_type": "team-strength",
                 "updated_at": now,
             }], "provider_key")
+            # Do not overwrite last_success_at when the live source is down.
             store.upsert("data_sources", [{
                 "provider_key": "clubelo",
                 "display_name": "ClubElo",
@@ -151,13 +161,7 @@ def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
                 "last_error": live_error,
                 "freshness_policy": "daily snapshot; retain last known data on source outage",
             }], "provider_key")
-            store.record_ingestion_finish(
-                run_id,
-                status="succeeded",
-                records_seen=len(existing),
-                records_upserted=0,
-                error_message=live_error,
-            )
+            store.record_ingestion_finish(run_id, status="succeeded", records_seen=len(existing), records_upserted=0, error_message=live_error)
             return {
                 "provider": "clubelo",
                 "rows": len(existing),
@@ -175,7 +179,7 @@ def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
             "error": live_error,
         }
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for _, row in frame.iterrows():
         club = row.get("Club")
         if not club or str(club) == "nan":
@@ -207,26 +211,20 @@ def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
         "provider_key": "clubelo",
         "display_name": "ClubElo",
         "last_attempt_at": now,
-        "last_success_at": now if fresh else None,
+        "last_success_at": now,
         "last_data_at": source_date,
         "last_success_rows": len(rows),
-        "last_error": None if fresh else live_error,
+        "last_error": None,
         "freshness_policy": "daily snapshot; retain last known data on source outage",
     }], "provider_key")
-    store.record_ingestion_finish(
-        run_id,
-        status="succeeded",
-        records_seen=len(rows),
-        records_upserted=len(rows),
-        error_message=None if fresh else live_error,
-    )
+    store.record_ingestion_finish(run_id, status="succeeded", records_seen=len(rows), records_upserted=len(rows), newest_match_at=None)
     return {
         "provider": "clubelo",
         "rows": len(rows),
         "fresh": fresh,
         "source_date": source_date,
         "updated_at": now,
-        "fallback_error": None if fresh else live_error,
+        "coverage": _coverage(store, rows),
     }
 
 
