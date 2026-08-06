@@ -2,8 +2,8 @@ name: Fovra data update
 
 on:
   schedule:
-    # Football-Data refresh cadence: Monday and Thursday at 01:00 UTC.
-    - cron: '0 1 * * 1,4'
+    # Complete free-provider refresh every 6 hours.
+    - cron: '10 */6 * * *'
   workflow_dispatch:
     inputs:
       task:
