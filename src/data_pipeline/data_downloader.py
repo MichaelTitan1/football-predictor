@@ -8,6 +8,7 @@ from Git. The canonical production source of truth remains Neon.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -41,6 +42,7 @@ PROCESSED_DIR = Path("data/processed")
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 START_YEAR = 2010
+
 def current_season_start(now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     return now.year if now.month >= 7 else now.year - 1
@@ -51,6 +53,7 @@ HTTP_TIMEOUT = 30
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
 UNAVAILABLE_PATH = RAW_DIR / "football_data_unavailable.json"
+SOURCE_STATE_PATH = RAW_DIR / "football_data_source_state.json"
 
 
 class FootballDataUnavailableError(RuntimeError):
@@ -73,6 +76,7 @@ def _resource_key(league_key: str, season_start: int | None = None) -> str:
         return f"{league_key}:new"
     return f"{league_key}:{season_start}" if season_start is not None else league_key
 
+
 def is_football_data_unavailable(league_key: str, season_start: int | None = None) -> bool:
     data = _load_unavailable()
     return _resource_key(league_key, season_start) in data or league_key in data
@@ -90,6 +94,40 @@ def mark_football_data_unavailable(league_key: str, url: str | None = None, stat
     UNAVAILABLE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     logger.info("Football-Data unavailable for %s; future runs will skip it immediately", league_key)
 
+
+def _load_source_state() -> Dict[str, dict]:
+    if not SOURCE_STATE_PATH.exists():
+        return {}
+    try:
+        return json.loads(SOURCE_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not read %s: %s", SOURCE_STATE_PATH, exc)
+        return {}
+
+
+def _save_source_state(state: Dict[str, dict]) -> None:
+    SOURCE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SOURCE_STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _source_fingerprint(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _source_changed(resource_key: str, data: bytes) -> bool:
+    state = _load_source_state()
+    return state.get(resource_key, {}).get("sha256") != _source_fingerprint(data)
+
+
+def _record_source_state(resource_key: str, url: str, data: bytes, row_count: int) -> None:
+    state = _load_source_state()
+    state[resource_key] = {
+        "url": url,
+        "sha256": _source_fingerprint(data),
+        "row_count": row_count,
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    _save_source_state(state)
 
 
 def _season_code(season_start: int) -> str:
@@ -197,6 +235,12 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
         raise FootballDataUnavailableError(f"Football-Data returned 404 for {league_key}")
     if data is None:
         return False
+    resource_key = _resource_key(league_key, season_start)
+    changed = _source_changed(resource_key, data)
+    if out_path.exists() and _file_is_valid(out_path) and not changed:
+        _record_source_state(resource_key, url, data, int(pd.read_csv(out_path, usecols=[0]).shape[0]))
+        logger.info("Football-Data source unchanged: %s", url)
+        return False
     try:
         from io import BytesIO
         df = pd.read_csv(BytesIO(data))
@@ -214,12 +258,15 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
         df["Tier"] = LEAGUE_CONFIG[league_key]["tier"]
     if "LeagueStrength" not in df.columns:
         df["LeagueStrength"] = LEAGUE_CONFIG[league_key]["strength"]
-    return _atomic_save_csv(df, out_path)
+    saved = _atomic_save_csv(df, out_path)
+    if saved:
+        _record_source_state(resource_key, url, data, len(df))
+    return saved
 
 
 def download_all_leagues(start_year: int = START_YEAR, end_year: Optional[int] = None) -> Dict[str, List[int]]:
     if end_year is None:
-        end_year = CURRENT_YEAR
+        end_year = current_season_start()
     started_at = time.monotonic()
     total_seasons = sum(1 if LEAGUE_CONFIG[l].get("source_type") == "single" else (end_year - start_year + 1) for l in ALLOWED_LEAGUES)
     completed = downloaded = skipped = unavailable = 0
@@ -232,17 +279,7 @@ def download_all_leagues(start_year: int = START_YEAR, end_year: Optional[int] =
             remaining = max(total_seasons - completed, 0)
             elapsed = time.monotonic() - started_at
             eta_seconds = (elapsed / completed * remaining) if completed else 0
-            logger.info(
-                "Current batch: %s %s | Downloaded=%s Skipped=%s Unavailable=%s Uploaded=%s Remaining=%s Estimated completion=%.1f minutes",
-                league,
-                year,
-                downloaded,
-                skipped,
-                unavailable,
-                downloaded,
-                remaining,
-                eta_seconds / 60,
-            )
+            logger.info("Current batch: %s %s | Downloaded=%s Skipped=%s Unavailable=%s Uploaded=%s Remaining=%s Estimated completion=%.1f minutes", league, year, downloaded, skipped, unavailable, downloaded, remaining, eta_seconds / 60)
             try:
                 if download_season_data(league, year):
                     results[league].append(year)
@@ -257,30 +294,24 @@ def download_all_leagues(start_year: int = START_YEAR, end_year: Optional[int] =
             except Exception:
                 skipped += 1
                 logger.exception("Unexpected error downloading %s %s", league, year)
-    logger.info(
-        "Downloaded=%s Skipped=%s Unavailable=%s Uploaded=%s Remaining=0 Estimated completion=0.0 minutes",
-        downloaded,
-        skipped,
-        unavailable,
-        downloaded,
-    )
+    logger.info("Downloaded=%s Skipped=%s Unavailable=%s Uploaded=%s Remaining=0 Estimated completion=0.0 minutes", downloaded, skipped, unavailable, downloaded)
     return results
 
 
 def update_latest_season() -> Dict[str, List[int]]:
-    """Download only seasons that are not already present locally.
+    """Refresh changed Football-Data sources and discover newly available seasons.
 
-    This is the post-bootstrap path for permanent free deployments: existing
-    football-data.co.uk CSV files are never redownloaded or refreshed here.
+    Single-file leagues are checked against their fixed new/{code}.csv source.
+    Season-based leagues refresh the latest known season and probe the next
+    automatically detected season without reprocessing every historical file.
     """
     results: Dict[str, List[int]] = {}
     for league in ALLOWED_LEAGUES:
         existing_years = []
         newly_downloaded: List[int] = []
         if LEAGUE_CONFIG[league].get("source_type") == "single":
-            if not (RAW_DIR / f"{league}_new.csv").exists():
-                if download_season_data(league, START_YEAR):
-                    newly_downloaded.append(START_YEAR)
+            if download_season_data(league, START_YEAR, force_refresh=True):
+                newly_downloaded.append(START_YEAR)
             results[league] = newly_downloaded
             continue
         for f in RAW_DIR.glob(f"{league}_*.csv"):
@@ -293,6 +324,8 @@ def update_latest_season() -> Dict[str, List[int]]:
             results[league] = newly_downloaded
             continue
         latest = max(existing_years)
+        if download_season_data(league, latest, force_refresh=True):
+            newly_downloaded.append(latest)
         next_season = latest + 1
         if next_season <= current_season_start() and download_season_data(league, next_season):
             newly_downloaded.append(next_season)
@@ -303,12 +336,10 @@ def update_latest_season() -> Dict[str, List[int]]:
 if __name__ == "__main__":
     import argparse
     import json
-
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Manage football-data.co.uk historical CSV downloads")
     parser.add_argument("--bootstrap", action="store_true", help="Initial setup only: download all configured leagues from 2010 to the current season")
     args = parser.parse_args()
-
     if args.bootstrap:
         end_year = current_season_start()
         logger.info("Initial historical bootstrap: %d -> %d", START_YEAR, end_year)

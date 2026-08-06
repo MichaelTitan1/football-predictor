@@ -103,3 +103,72 @@ def test_neon_batch_idempotency_insert_skip_update_and_retry():
     store.fail_once = True
     assert store.upsert_snapshot(leagues, teams, [_match(4), _match(5), _match(6)], "football-data.co.uk", "2026-08-04T00:00:00+00:00") == 3
     assert store.failed is True
+
+
+def test_all_16_fixed_file_urls_are_exact():
+    expected = {
+        "ARG": "https://www.football-data.co.uk/new/ARG.csv",
+        "AUT": "https://www.football-data.co.uk/new/AUT.csv",
+        "BRA": "https://www.football-data.co.uk/new/BRA.csv",
+        "CHN": "https://www.football-data.co.uk/new/CHN.csv",
+        "DNK": "https://www.football-data.co.uk/new/DNK.csv",
+        "FIN": "https://www.football-data.co.uk/new/FIN.csv",
+        "IRL": "https://www.football-data.co.uk/new/IRL.csv",
+        "JPN": "https://www.football-data.co.uk/new/JPN.csv",
+        "MEX": "https://www.football-data.co.uk/new/MEX.csv",
+        "NOR": "https://www.football-data.co.uk/new/NOR.csv",
+        "POL": "https://www.football-data.co.uk/new/POL.csv",
+        "ROU": "https://www.football-data.co.uk/new/ROU.csv",
+        "RUS": "https://www.football-data.co.uk/new/RUS.csv",
+        "SWE": "https://www.football-data.co.uk/new/SWE.csv",
+        "SWZ": "https://www.football-data.co.uk/new/SWZ.csv",
+        "USA": "https://www.football-data.co.uk/new/USA.csv",
+    }
+    assert {code: data_downloader._candidate_url(code, 2010) for code in SINGLE} == expected
+    assert all("/mmz4281/" not in url for url in expected.values())
+
+
+def test_fixed_file_leagues_download_once_and_parse_all_rows(monkeypatch, tmp_path):
+    csv = b"Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n01/01/2024,Alpha,Beta,1,0,H\n02/01/2025,Gamma,Delta,2,2,D\n"
+    calls = []
+    monkeypatch.setattr(data_downloader, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(data_downloader, "UNAVAILABLE_PATH", tmp_path / "unavailable.json")
+    monkeypatch.setattr(data_downloader, "SOURCE_STATE_PATH", tmp_path / "source_state.json")
+    monkeypatch.setattr(data_downloader, "_http_get", lambda url: (calls.append(url) or (csv, 200)))
+    assert data_downloader.download_season_data("ARG", data_downloader.START_YEAR, force_refresh=True) is True
+    assert calls == ["https://www.football-data.co.uk/new/ARG.csv"]
+    provider = __import__("src.data_pipeline.football_data_provider", fromlist=["FootballDataProvider"]).FootballDataProvider(raw_dir=tmp_path, include_remote=False)
+    snapshot = provider.fetch()
+    assert len(snapshot.matches) == 2
+    assert {m.league_key for m in snapshot.matches} == {"ARG"}
+    calls.clear()
+    assert data_downloader.download_season_data("ARG", data_downloader.START_YEAR, force_refresh=True) is False
+    assert calls == ["https://www.football-data.co.uk/new/ARG.csv"]
+
+
+def test_neon_dsn_adds_ssl_and_ipv4_hostaddr(monkeypatch):
+    from src.data_pipeline.neon_store import _safe_dsn_for_connect
+    monkeypatch.setattr("src.data_pipeline.neon_store.socket.getaddrinfo", lambda *a, **k: [(None, None, None, None, ("203.0.113.10", 5432))])
+    dsn = _safe_dsn_for_connect("postgresql://user:secret@example.neon.tech/db")
+    assert "sslmode=require" in dsn
+    assert "hostaddr=203.0.113.10" in dsn
+    assert "secret" in dsn  # retained for psycopg, but callers never log this DSN
+
+
+class VerifyCursor:
+    description = [("?column?",)]
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def execute(self, sql, params=()): self.sql = sql
+    def fetchone(self): return (1,)
+
+
+class VerifyConnection:
+    def cursor(self): return VerifyCursor()
+    def commit(self): self.committed = True
+
+
+def test_neon_select_1_verification_uses_parameterless_probe():
+    store = NeonStore(connection=VerifyConnection())
+    store.verify_connection()
+    assert store.connection.committed is True
