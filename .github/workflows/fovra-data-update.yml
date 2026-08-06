@@ -57,9 +57,23 @@ jobs:
           python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Repair missing Football-Data league sources
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical'
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data'
         run: |
           python -m src.data_pipeline.data_downloader --repair
+
+      - name: Refresh the 16 Football-Data extra-league feeds
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data'
+        run: |
+          python - <<'PY'
+          from src.data_pipeline.data_downloader import LEAGUE_CONFIG, START_YEAR, download_season_data
+          for league, info in LEAGUE_CONFIG.items():
+              if info.get('source_type') != 'single':
+                  continue
+              try:
+                  download_season_data(league, START_YEAR, force_refresh=True, ignore_unavailable=True)
+              except Exception as exc:
+                  print(f'WARNING: {league} extra-league refresh failed: {exc}')
+          PY
           python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Initial Football-Data bootstrap from 2010
@@ -86,7 +100,6 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           python - <<'PY'
-          import json
           from src.data_pipeline.neon_store import NeonStore
           from src.data_pipeline.league_config import load_enabled_leagues
 
