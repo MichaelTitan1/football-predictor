@@ -2,8 +2,8 @@ name: Fovra data update
 
 on:
   schedule:
-    # Complete free-provider refresh every 6 hours.
-    - cron: '10 */6 * * *'
+    # Football-Data and ClubElo refresh twice weekly: Monday and Wednesday.
+    - cron: '10 08 * * 1,3'
   workflow_dispatch:
     inputs:
       task:
@@ -11,14 +11,24 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, football-data, clubelo, weather, features, predictions, results, bootstrap-historical]
+        options: [all, football-data, clubelo, features, predictions, results, bootstrap-historical]
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore Football-Data cache
+        id: football-data-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/raw
+            data/processed/merged_dataset.csv
+          key: fovra-football-data-v1-${{ runner.os }}-${{ hashFiles('config/leagues.json') }}
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -33,8 +43,14 @@ jobs:
             echo "task=all" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Bootstrap all 38 Football-Data leagues on first cache miss
+        if: (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data') && steps.football-data-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m src.data_pipeline.data_downloader --bootstrap
+          python -m src.data_pipeline.prepare_merged_dataset
+
       - name: Update Football-Data historical/current CSVs
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data'
+        if: (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data') && steps.football-data-cache.outputs.cache-hit == 'true'
         run: |
           python -m src.data_pipeline.data_downloader
           python -m src.data_pipeline.prepare_merged_dataset
@@ -46,7 +62,7 @@ jobs:
           python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Verify Neon PostgreSQL connectivity
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'weather' || steps.task.outputs.task == 'predictions'
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -c "from src.data_pipeline.neon_store import NeonStore; store=NeonStore(); store.verify_connection(); print('Neon SELECT 1 succeeded')"
@@ -57,26 +73,18 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m src.data_pipeline.update_canonical --source football-data
 
-
       - name: Refresh ClubElo team strength
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
 
-      - name: Refresh MET Norway weather
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'weather'
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          MET_NORWAY_USER_AGENT: ${{ vars.MET_NORWAY_USER_AGENT }}
-        run: python -c "from src.data_pipeline.enrichment import refresh_weather; print(refresh_weather())"
-
       - name: Refresh features
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'features'
         run: python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Generate and archive Match Winner 1X2 predictions
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'predictions'
+        if: steps.task.outputs.task == 'predictions'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FOOTBALL_MODEL_PATH: models/football_model.cbm
