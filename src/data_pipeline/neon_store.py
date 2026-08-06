@@ -60,6 +60,7 @@ def _jsonable(value: Any) -> Any:
         return {k: _jsonable(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_jsonable(v) for v in value]
+    # numpy scalar handling
     if hasattr(value, "item"):
         try:
             value = value.item()
@@ -185,7 +186,15 @@ class NeonStore:
             sql = f"insert into {table} ({', '.join(cols)}) values ({placeholders}) on conflict ({on_conflict}) do update set {updates}"
         with self.connection.cursor() as cur:
             for row in rows:
-                cur.execute(sql, tuple(json.dumps(_jsonable(row[c])) if isinstance(_jsonable(row[c]), (dict, list)) else _jsonable(row[c]) for c in cols))
+                cur.execute(
+                    sql,
+                    tuple(
+                        json.dumps(_jsonable(row[c]))
+                        if isinstance(_jsonable(row[c]), (dict, list))
+                        else _jsonable(row[c])
+                        for c in cols
+                    ),
+                )
         self.connection.commit()
 
     def record_ingestion_start(self, provider: str) -> str:
@@ -257,7 +266,7 @@ class NeonStore:
         return uploaded
 
     def resolve_predictions(self, matches: Iterable[MatchRecord]) -> int:
-        finished = {m.match_key: m for m in matches if m.status == "finished" and m.home_score is not None and m.away_score is not None}
+        finished = {m.match_key: m for m in matches if getattr(m, "status", None) == "finished" and getattr(m, "home_score", None) is not None and getattr(m, "away_score", None) is not None}
         if not finished:
             return 0
         rows = self.select("prediction_archive", "is_correct is null", columns="prediction_key,match_canonical_key,selected_prediction")
@@ -267,6 +276,17 @@ class NeonStore:
             if not match:
                 continue
             actual = "H" if match.home_score > match.away_score else "A" if match.away_score > match.home_score else "D"
-            self.update("prediction_archive", {"actual_result": actual, "actual_home_score": match.home_score, "actual_away_score": match.away_score, "resolved_at": datetime.now(timezone.utc).isoformat(), "is_correct": row.get("selected_prediction") == actual}, "prediction_key = %s", (row["prediction_key"],))
+            self.update(
+                "prediction_archive",
+                {
+                    "actual_result": actual,
+                    "actual_home_score": match.home_score,
+                    "actual_away_score": match.away_score,
+                    "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    "is_correct": True if row.get("selected_prediction") == actual else False,
+                },
+                "prediction_key = %s",
+                (row.get("prediction_key"),),
+            )
             resolved += 1
         return resolved
