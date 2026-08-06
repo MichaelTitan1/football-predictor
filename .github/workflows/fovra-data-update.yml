@@ -2,7 +2,8 @@ name: Fovra data update
 
 on:
   schedule:
-    # Football-Data and ClubElo refresh twice weekly: Monday and Wednesday.
+    # Football-Data publishes updates at least twice weekly; run after the
+    # Monday/Wednesday refresh window in UTC.
     - cron: '10 08 * * 1,3'
   workflow_dispatch:
     inputs:
@@ -43,7 +44,7 @@ jobs:
             echo "task=all" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Bootstrap all 38 Football-Data leagues on first cache miss
+      - name: Bootstrap all configured Football-Data history on first cache miss
         if: (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data') && steps.football-data-cache.outputs.cache-hit != 'true'
         run: |
           python -m src.data_pipeline.data_downloader --bootstrap
@@ -55,6 +56,12 @@ jobs:
           python -m src.data_pipeline.data_downloader
           python -m src.data_pipeline.prepare_merged_dataset
 
+      - name: Repair missing Football-Data league sources
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical'
+        run: |
+          python -m src.data_pipeline.data_downloader --repair
+          python -m src.data_pipeline.prepare_merged_dataset
+
       - name: Initial Football-Data bootstrap from 2010
         if: steps.task.outputs.task == 'bootstrap-historical'
         run: |
@@ -62,7 +69,7 @@ jobs:
           python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Verify Neon PostgreSQL connectivity
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions'
+        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -c "from src.data_pipeline.neon_store import NeonStore; store=NeonStore(); store.verify_connection(); print('Neon SELECT 1 succeeded')"
@@ -73,10 +80,33 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m src.data_pipeline.update_canonical --source football-data
 
-      - name: Refresh ClubElo team strength
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo'
+      - name: Verify all 38 configured leagues reached Neon
+        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import json
+          from src.data_pipeline.neon_store import NeonStore
+          from src.data_pipeline.league_config import load_enabled_leagues
+
+          expected = {x.key for x in load_enabled_leagues()}
+          store = NeonStore()
+          rows = store.select('leagues', columns='canonical_key')
+          actual = {str(row['canonical_key']) for row in rows}
+          missing = sorted(expected - actual)
+          print(f'Neon league coverage: {len(actual & expected)}/{len(expected)}')
+          if missing:
+              raise SystemExit('Missing configured leagues in Neon: ' + ', '.join(missing))
+          PY
+
+      - name: Refresh ClubElo team strength
+        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo')
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLUBELO_TIMEOUT_SECONDS: '60'
+          CLUBELO_LOOKBACK_DAYS: '7'
+          CLUBELO_RETRIES: '4'
         run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
 
       - name: Refresh features
