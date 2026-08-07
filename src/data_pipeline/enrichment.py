@@ -242,7 +242,6 @@ def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
     store.upsert("data_sources", [{
         "provider_key": "clubelo",
         "display_name": "ClubElo",
-        "source_type": "team-strength",
         "last_attempt_at": now,
         "last_success_at": now,
         "last_data_at": source_date,
