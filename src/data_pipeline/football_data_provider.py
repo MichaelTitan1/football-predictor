@@ -46,6 +46,17 @@ class FootballDataProvider:
                 return parsed.replace(tzinfo=ZoneInfo("Europe/London")).astimezone(timezone.utc).isoformat(timespec="seconds")
             except ValueError:
                 continue
+        # v2 writes normalized local snapshots with pandas datetime values.
+        # Accept those ISO/ISO-like values as well, so a successful /new/*.csv
+        # download is not discarded during canonicalization.
+        parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+        if pd.notna(parsed):
+            if isinstance(parsed, pd.Timestamp):
+                if parsed.tzinfo is None:
+                    parsed = parsed.to_pydatetime().replace(tzinfo=ZoneInfo("Europe/London"))
+                else:
+                    parsed = parsed.to_pydatetime()
+                return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
         raise ValueError(f"unsupported Football-Data date format: {value}")
     def _get(self,url:str):
         try:
@@ -88,9 +99,13 @@ class FootballDataProvider:
         return frames
     def _normalize(self,frames):
         leagues={}; teams={}; matches={}; code_to_key={v["code"]:k for k,v in LEAGUE_CONFIG.items()}
+        aliases={"Home":"HomeTeam","Away":"AwayTeam","HG":"FTHG","AG":"FTAG","Res":"FTR"}
         for raw in frames:
             if raw is None or raw.empty: continue
-            df=raw.copy(); df.columns=[str(c).strip() for c in df.columns]; league_value=df.get("League",df.get("Div"))
+            df=raw.copy(); df.columns=[str(c).strip().lstrip("\ufeff") for c in df.columns]
+            rename={source:target for source,target in aliases.items() if target not in df.columns and source in df.columns}
+            if rename: df=df.rename(columns=rename)
+            league_value=df.get("League",df.get("Div"))
             if league_value is None: continue
             for idx,row in df.iterrows():
                 code=str(league_value.loc[idx]).strip() if idx in league_value.index else ""; lk=code if code in LEAGUE_CONFIG else code_to_key.get(code)
