@@ -32,7 +32,7 @@ jobs:
           path: |
             data/raw
             data/processed/merged_dataset.csv
-          key: fovra-football-data-v2-${{ runner.os }}-${{ hashFiles('config/leagues.json') }}
+          key: fovra-football-data-v1-${{ runner.os }}-${{ hashFiles('config/leagues.json') }}
 
       - uses: actions/setup-python@v5
         with:
