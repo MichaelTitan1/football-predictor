@@ -120,18 +120,50 @@ def _coverage(store: NeonStore, clubelo_rows: list[dict[str, Any]]) -> dict[str,
         return {}
 
 
+def _select_existing_strength(store: NeonStore) -> tuple[NeonStore, list[dict[str, Any]]]:
+    """Read existing strength, reconnecting once if Neon dropped an idle SSL session."""
+    try:
+        return store, store.select(
+            "team_strength",
+            columns="team_slug,team_name,elo,rank,country,level,from_date,to_date,source_provider,updated_at",
+        )
+    except Exception as exc:
+        text = str(exc).lower()
+        transient = any(
+            marker in text
+            for marker in (
+                "ssl connection has been closed",
+                "consuming input failed",
+                "connection is closed",
+                "server closed the connection",
+                "connection reset by peer",
+            )
+        )
+        if not transient:
+            raise
+        try:
+            store.connection.close()
+        except Exception:
+            pass
+        fresh_store = NeonStore()
+        return fresh_store, fresh_store.select(
+            "team_strength",
+            columns="team_slug,team_name,elo,rank,country,level,from_date,to_date,source_provider,updated_at",
+        )
+
+
 def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
-    """Refresh ClubElo without making a temporary source outage break Fovra.
+    """Refresh ClubElo without making a temporary source or Neon outage break Fovra.
 
-    Fresh data is preferred. If ClubElo is temporarily unreachable, the last
-    successful local snapshot is retained. If no local snapshot exists, the
-    existing Neon team_strength table is retained as the final fallback.
+    The ClubElo HTTP request is intentionally completed before opening the Neon
+    connection. This prevents a long source retry/lookback period from leaving
+    an idle PostgreSQL SSL session open while no database work is happening.
+    If Neon drops a connection during the fallback read, one fresh connection
+    is opened automatically.
     """
-    store = store or NeonStore()
-    store.initialize_schema()
     now = datetime.now(timezone.utc).isoformat()
-    run_id = store.record_ingestion_start("clubelo")
 
+    # Never hold an idle Neon connection while ClubElo is being fetched.
     frame, source_date, live_error = _fetch_clubelo_snapshot(datetime.now(timezone.utc).date())
     fresh = frame is not None
     if frame is not None and source_date:
@@ -139,11 +171,12 @@ def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
     else:
         frame, source_date = _load_cached_clubelo()
 
+    store = store or NeonStore()
+    store.initialize_schema()
+    run_id = store.record_ingestion_start("clubelo")
+
     if frame is None:
-        existing = store.select(
-            "team_strength",
-            columns="team_slug,team_name,elo,rank,country,level,from_date,to_date,source_provider,updated_at",
-        )
+        store, existing = _select_existing_strength(store)
         if existing:
             store.upsert("provider_sources", [{
                 "provider_key": "clubelo",
@@ -151,7 +184,6 @@ def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
                 "source_type": "team-strength",
                 "updated_at": now,
             }], "provider_key")
-            # Do not overwrite last_success_at when the live source is down.
             store.upsert("data_sources", [{
                 "provider_key": "clubelo",
                 "display_name": "ClubElo",
@@ -210,6 +242,7 @@ def refresh_clubelo(store: NeonStore | None = None) -> dict[str, Any]:
     store.upsert("data_sources", [{
         "provider_key": "clubelo",
         "display_name": "ClubElo",
+        "source_type": "team-strength",
         "last_attempt_at": now,
         "last_success_at": now,
         "last_data_at": source_date,
