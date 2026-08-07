@@ -14,6 +14,10 @@ on:
         type: choice
         options: [all, football-data, clubelo, features, predictions, results, bootstrap-historical]
 
+concurrency:
+  group: fovra-data-update-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -44,55 +48,20 @@ jobs:
             echo "task=all" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Bootstrap all configured Football-Data history on first cache miss
-        if: (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data') && steps.football-data-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m src.data_pipeline.data_downloader --bootstrap
-          python -m src.data_pipeline.prepare_merged_dataset
-
-      - name: Update Football-Data historical/current CSVs
-        if: (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data') && steps.football-data-cache.outputs.cache-hit == 'true'
-        run: |
-          python -m src.data_pipeline.data_downloader
-          python -m src.data_pipeline.prepare_merged_dataset
-
-      - name: Repair missing Football-Data league sources
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data'
-        run: |
-          python -m src.data_pipeline.data_downloader --repair
-
-      - name: Refresh the 16 Football-Data extra-league feeds
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data'
-        run: |
-          python - <<'PY'
-          from src.data_pipeline.data_downloader import LEAGUE_CONFIG, START_YEAR, download_season_data
-          for league, info in LEAGUE_CONFIG.items():
-              if info.get('source_type') != 'single':
-                  continue
-              try:
-                  download_season_data(league, START_YEAR, force_refresh=True, ignore_unavailable=True)
-              except Exception as exc:
-                  print(f'WARNING: {league} extra-league refresh failed: {exc}')
-          PY
-          python -m src.data_pipeline.prepare_merged_dataset
-
-      - name: Initial Football-Data bootstrap from 2010
-        if: steps.task.outputs.task == 'bootstrap-historical'
-        run: |
-          python -m src.data_pipeline.data_downloader --bootstrap
-          python -m src.data_pipeline.prepare_merged_dataset
+      - name: Fast Football-Data 38-league ingestion
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FOVRA_FAST_STAGE_BATCH: '10000'
+          FOVRA_SINGLE_FEED_TIMEOUT: '60'
+          FOVRA_SINGLE_FEED_RETRIES: '5'
+        run: python -m src.data_pipeline.fast_football_data_ingest
 
       - name: Verify Neon PostgreSQL connectivity
         if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -c "from src.data_pipeline.neon_store import NeonStore; store=NeonStore(); store.verify_connection(); print('Neon SELECT 1 succeeded')"
-
-      - name: Upsert Football-Data canonical matches and resolve completed results
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results'
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python -m src.data_pipeline.update_canonical --source football-data
 
       - name: Verify all 38 configured leagues reached Neon
         if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical')
