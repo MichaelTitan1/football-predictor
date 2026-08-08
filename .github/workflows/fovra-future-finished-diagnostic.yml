@@ -1,0 +1,37 @@
+name: Fovra future-finished diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run read-only Neon diagnostic
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FOVRA_FUTURE_FINISHED_REPORT: neon_future_finished_diagnostic.json
+        run: python -m scripts.neon_future_finished_diagnostic | tee neon_future_finished_summary.json
+
+      - name: Upload diagnostic reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: fovra-future-finished-diagnostic-${{ github.run_id }}
+          path: |
+            neon_future_finished_diagnostic.json
+            neon_future_finished_summary.json
+          if-no-files-found: error
+          retention-days: 14
