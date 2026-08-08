@@ -22,7 +22,7 @@ STALE_RUNNING_HOURS = float(os.getenv("FOVRA_AUDIT_STALE_RUNNING_HOURS", "2"))
 
 
 def sql_rows(store: NeonStore, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    """Read-only SQL helper. All SQL in this module is hard-coded audit SQL."""
+    """Execute only hard-coded SELECT statements; this module never writes."""
     return store._fetchall(sql, params)
 
 
@@ -48,15 +48,18 @@ def check_leagues(store: NeonStore, expected):
     match_counts = sql_rows(store, "select league_canonical_key,count(*) as matches from matches group by league_canonical_key")
     by_league = {str(r["league_canonical_key"]): int(r["matches"]) for r in match_counts}
     no_matches = sorted(k for k in expected_keys if by_league.get(k, 0) == 0)
+    blank_names = sorted(str(r["canonical_key"]) for r in rows if not str(r.get("name") or "").strip())
     issues = []
     if missing: issues.append({"severity":"CRITICAL","check":"league_coverage","items":missing})
     if no_matches: issues.append({"severity":"CRITICAL","check":"league_match_coverage","items":no_matches})
+    if blank_names: issues.append({"severity":"CRITICAL","check":"league_blank_names","items":blank_names})
     if unexpected: issues.append({"severity":"WARNING","check":"unexpected_leagues","items":unexpected})
     return {
         "configured": len(expected_keys), "in_neon": len(actual), "covered": len(expected_keys & actual),
         "missing": missing, "leagues_with_zero_matches": no_matches,
         "match_counts": {k: by_league.get(k, 0) for k in sorted(expected_keys)},
-        "unexpected": unexpected, "status": "PASS" if not (missing or no_matches) else "FAIL",
+        "unexpected": unexpected, "blank_names": blank_names,
+        "status": "PASS" if not (missing or no_matches or blank_names) else "FAIL",
     }, issues
 
 
@@ -104,6 +107,15 @@ def check_provider_integrity(store: NeonStore):
     return {"total":count(store,"provider_records"),"missing_provider_source":missing_source,"orphan_match_records":orphan_match,"status":"PASS" if not issues else "FAIL"},issues
 
 
+def check_sources(store: NeonStore):
+    missing_provider_sources = len(sql_rows(store,"select d.provider_key from data_sources d left join provider_sources p on p.provider_key=d.provider_key where p.provider_key is null"))
+    error_sources = sql_rows(store,"select provider_key,last_success_at,last_data_at,last_success_rows,last_error from data_sources where last_error is not null")
+    issues=[]
+    if missing_provider_sources: issues.append({"severity":"CRITICAL","check":"data_source_missing_provider_source","count":missing_provider_sources})
+    if error_sources: issues.append({"severity":"WARNING","check":"data_sources_with_last_error","count":len(error_sources),"items":error_sources[:20]})
+    return {"rows":count(store,"data_sources"),"missing_provider_sources":missing_provider_sources,"sources_with_last_error":len(error_sources),"status":"PASS" if not missing_provider_sources else "FAIL"},issues
+
+
 def check_strength(store: NeonStore):
     rows=count(store,"team_strength")
     null_elo=count(store,"team_strength","elo is null")
@@ -114,6 +126,17 @@ def check_strength(store: NeonStore):
     for name,value in (("strength_null_elo",null_elo),("strength_nonpositive_elo",nonpositive),("strength_blank_slug",blank_slug),("strength_duplicate_team_slug",len(duplicates))):
         if value: issues.append({"severity":"CRITICAL","check":name,"count":value})
     return {"rows":rows,"null_elo":null_elo,"nonpositive_elo":nonpositive,"blank_slug":blank_slug,"duplicate_team_slugs":len(duplicates),"status":"PASS" if not issues else "FAIL"},issues
+
+
+def check_statistics_and_standings(store: NeonStore):
+    stats_orphan_leagues=len(sql_rows(store,"select s.league_canonical_key from team_statistics s left join leagues l on l.canonical_key=s.league_canonical_key where l.canonical_key is null"))
+    standings_orphan_leagues=len(sql_rows(store,"select s.league_canonical_key from league_standings s left join leagues l on l.canonical_key=s.league_canonical_key where l.canonical_key is null"))
+    bad_stats=count(store,"team_statistics","season is null or btrim(season)='' or team_slug is null or btrim(team_slug)=''")
+    bad_standings=count(store,"league_standings","rank<=0 or team is null or btrim(team)=''")
+    issues=[]
+    for name,value in (("team_statistics_orphan_leagues",stats_orphan_leagues),("team_statistics_invalid_identity",bad_stats),("league_standings_orphan_leagues",standings_orphan_leagues),("league_standings_invalid_rows",bad_standings)):
+        if value: issues.append({"severity":"CRITICAL","check":name,"count":value})
+    return {"team_statistics_rows":count(store,"team_statistics"),"league_standings_rows":count(store,"league_standings"),"stats_orphan_leagues":stats_orphan_leagues,"stats_invalid_identity":bad_stats,"standings_orphan_leagues":standings_orphan_leagues,"standings_invalid_rows":bad_standings,"status":"PASS" if not issues else "FAIL"},issues
 
 
 def check_ingestion_runs(store: NeonStore):
@@ -133,10 +156,12 @@ def check_prediction_tables(store: NeonStore):
     total=count(store,"predictions")
     bad_range=count(store,"predictions","home_probability<0 or home_probability>1 or draw_probability<0 or draw_probability>1 or away_probability<0 or away_probability>1")
     bad_sum=count(store,"predictions","abs((coalesce(home_probability,0)+coalesce(draw_probability,0)+coalesce(away_probability,0))-1)>0.01")
+    orphan_archive=len(sql_rows(store,"select a.prediction_key from prediction_archive a left join matches m on m.canonical_key=a.match_canonical_key where a.match_canonical_key is not null and m.canonical_key is null"))
     issues=[]
     if bad_range: issues.append({"severity":"CRITICAL","check":"prediction_probability_range","count":bad_range})
     if bad_sum: issues.append({"severity":"CRITICAL","check":"prediction_probability_sum","count":bad_sum})
-    return {"rows":total,"bad_probability_rows":bad_range,"probability_sum_outside_tolerance":bad_sum,"status":"PASS" if not issues else "FAIL","empty_allowed_before_prediction_workflow":True},issues
+    if orphan_archive: issues.append({"severity":"CRITICAL","check":"prediction_archive_orphan_match","count":orphan_archive})
+    return {"rows":total,"bad_probability_rows":bad_range,"probability_sum_outside_tolerance":bad_sum,"orphan_archive_matches":orphan_archive,"status":"PASS" if not issues else "FAIL","empty_allowed_before_prediction_workflow":True},issues
 
 
 def run_audit() -> dict[str,Any]:
@@ -148,13 +173,14 @@ def run_audit() -> dict[str,Any]:
     for name,fn,args in [
         ("tables",check_tables,(store,)),("leagues",check_leagues,(store,expected)),
         ("matches",check_matches,(store,)),("teams",check_teams,(store,)),
-        ("provider_integrity",check_provider_integrity,(store,)),("team_strength",check_strength,(store,)),
+        ("provider_integrity",check_provider_integrity,(store,)),("data_sources",check_sources,(store,)),
+        ("team_strength",check_strength,(store,)),("statistics_and_standings",check_statistics_and_standings,(store,)),
         ("ingestion_runs",check_ingestion_runs,(store,)),("predictions",check_prediction_tables,(store,)),
     ]:
         result,found=fn(*args); checks[name]=result; issues.extend(found)
     critical=sum(i["severity"]=="CRITICAL" for i in issues)
     warnings=sum(i["severity"]=="WARNING" for i in issues)
-    return {"audit_version":"1.1","database":"Neon PostgreSQL","weather_audit":"excluded_suspended","generated_at":datetime.now(timezone.utc).isoformat(),"checks":checks,"critical_errors":critical,"warnings":warnings,"data_ready_for_ml":critical==0,"issues":issues}
+    return {"audit_version":"1.2","database":"Neon PostgreSQL","weather_audit":"excluded_suspended","generated_at":datetime.now(timezone.utc).isoformat(),"checks":checks,"critical_errors":critical,"warnings":warnings,"data_ready_for_ml":critical==0,"issues":issues}
 
 
 def main()->int:
