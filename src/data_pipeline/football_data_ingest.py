@@ -37,14 +37,7 @@ def _mark_raw_format_current() -> None:
 
 
 def refresh_sources() -> dict[str, Any]:
-    """Refresh Football-Data without changing provider dates before parsing.
-
-    Season leagues use one source file per season. Extra leagues use their
-    all-seasons /new feed. During the one-time format migration, all historical
-    season files are refreshed so previously normalized Date values are replaced
-    by the exact provider CSV values. A failed download never deletes a good
-    local file.
-    """
+    """Refresh provider CSVs while preserving raw Date/Time values exactly."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     current = current_season_start()
     migration = _raw_sources_need_refresh()
@@ -59,22 +52,13 @@ def refresh_sources() -> dict[str, Any]:
         )
         for year in years:
             try:
-                changed = download_season_data(
-                    league,
-                    year,
-                    force_refresh=True,
-                    ignore_unavailable=True,
-                )
+                changed = download_season_data(league, year, force_refresh=True, ignore_unavailable=True)
                 key = f"{league}:new" if source_type == "single" else f"{league}:{year}"
-                if changed:
-                    refreshed.append(key)
-                else:
-                    skipped.append(key)
+                (refreshed if changed else skipped).append(key)
             except Exception as exc:
                 failed.append(f"{league}:{year}")
                 logger.error("Football-Data source refresh failed for %s %s: %s", league, year, exc)
 
-    # Never claim the migration is complete if any source could not be refreshed.
     if not failed:
         _mark_raw_format_current()
     else:
@@ -88,6 +72,24 @@ def refresh_sources() -> dict[str, Any]:
         "failed": failed,
         "current_season": f"{current}-{current + 1}",
     }
+
+
+def _quarantine_future_finished(store: NeonStore) -> int:
+    """Remove only invalid future+finished state from the canonical ML surface.
+
+    Provider evidence is deliberately retained in provider_records. The 800
+    legacy rows therefore remain available for forensic comparison but cannot
+    enter the finished-match training surface.
+    """
+    with store.connection.cursor() as cur:
+        cur.execute(
+            """UPDATE matches
+               SET status='scheduled', home_score=NULL, away_score=NULL, updated_at=now()
+             WHERE status='finished' AND kickoff_at > now()"""
+        )
+        count = cur.rowcount
+    store.connection.commit()
+    return int(count)
 
 
 def run() -> dict[str, Any]:
@@ -114,6 +116,7 @@ def run() -> dict[str, Any]:
             snapshot.provider,
             snapshot.fetched_at,
         )
+        quarantined = _quarantine_future_finished(store)
         store.record_ingestion_finish(
             run_id,
             status="succeeded",
@@ -127,6 +130,7 @@ def run() -> dict[str, Any]:
             "teams": len(snapshot.teams),
             "matches": len(matches),
             "upserted": upserted,
+            "future_finished_quarantined": quarantined,
         }
     except Exception as exc:
         store.record_ingestion_finish(
@@ -141,8 +145,7 @@ def run() -> dict[str, Any]:
 
 def main() -> None:
     logging.basicConfig(level=os.getenv("FOVRA_LOG_LEVEL", "INFO"))
-    result = run()
-    print(json.dumps(result, indent=2, sort_keys=True))
+    print(json.dumps(run(), indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
