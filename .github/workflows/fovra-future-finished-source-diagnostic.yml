@@ -1,0 +1,39 @@
+name: Fovra future-finished source diagnostic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run read-only source-vs-Neon diagnostic
+        run: python -m scripts.neon_future_finished_source_diagnostic | tee neon_future_finished_source_diagnostic_summary.json
+
+      - name: Upload diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fovra-future-finished-source-diagnostic-${{ github.run_id }}
+          path: |
+            neon_future_finished_source_diagnostic.json
+            neon_future_finished_source_diagnostic_summary.json
+          if-no-files-found: error
+          retention-days: 14
