@@ -1,0 +1,56 @@
+name: Fovra Neon data audit
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Fovra data update"]
+    types: [completed]
+
+concurrency:
+  group: fovra-neon-data-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    # Manual runs always execute. Automatic runs execute after the data workflow,
+    # including failed/partial updates, so the report shows the actual Neon state.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run read-only Neon data audit
+        id: audit
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FOVRA_AUDIT_STALE_RUNNING_HOURS: '2'
+        run: |
+          python scripts/neon_data_audit.py | tee neon_data_audit.json
+
+      - name: Upload Neon audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fovra-neon-data-audit-${{ github.run_id }}
+          path: neon_data_audit.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Print audit result
+        if: always()
+        run: |
+          echo "Audit step outcome: ${{ steps.audit.outcome }}"
+          if [ "${{ steps.audit.outcome }}" != "success" ]; then
+            echo "Neon data audit found critical data-quality problems. See the uploaded neon_data_audit.json artifact for the exact checks and rows." 
+            exit 1
+          fi
+          echo "Neon data audit passed: DATA READY FOR ML"
