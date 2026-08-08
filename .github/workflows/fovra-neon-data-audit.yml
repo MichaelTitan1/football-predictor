@@ -39,7 +39,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FOVRA_AUDIT_STALE_RUNNING_HOURS: '2'
         run: |
-          python scripts/neon_data_audit.py | tee neon_data_audit.json
+          set -o pipefail
+          python -m scripts.neon_data_audit | tee neon_data_audit.json
 
       - name: Upload Neon audit report
         if: always()
@@ -55,7 +56,7 @@ jobs:
         run: |
           echo "Audit step outcome: ${{ steps.audit.outcome }}"
           if [ "${{ steps.audit.outcome }}" != "success" ]; then
-            echo "Neon data audit found critical data-quality problems. See the uploaded neon_data_audit.json artifact for the exact checks and rows."
+            echo "Neon data audit found critical data-quality problems or the audit itself failed. See the uploaded neon_data_audit.json artifact for the exact checks and rows."
             exit 1
           fi
           echo "Neon data audit passed: DATA READY FOR ML"
