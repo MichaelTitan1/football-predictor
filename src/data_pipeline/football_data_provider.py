@@ -20,10 +20,6 @@ BASE_URL = "https://www.football-data.co.uk/mmz4281"
 NEW_URL = "https://www.football-data.co.uk/new"
 FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 REQUEST_TIMEOUT = 30
-SOURCE_COLUMNS = {
-    "_FovraSourceType", "_FovraSourceKey", "_FovraSourceUrl",
-    "_FovraSeasonStart", "_FovraRawDate", "_FovraRawTime",
-}
 
 
 @dataclass(frozen=True)
@@ -60,8 +56,8 @@ class FootballDataProvider:
 
     @staticmethod
     def _parse_datetime(row: pd.Series) -> tuple[datetime, str, str]:
-        raw_date = row.get("_FovraRawDate", row.get("Date"))
-        raw_time = row.get("_FovraRawTime", row.get("Time"))
+        raw_date = row.get("Date")
+        raw_time = row.get("Time")
         if pd.isna(raw_date):
             raise ValueError("match has no date")
         date_text = str(raw_date).strip()
@@ -85,8 +81,6 @@ class FootballDataProvider:
 
     @staticmethod
     def _season_bounds(season_start: int) -> tuple[datetime, datetime]:
-        # Broad bounds intentionally cover legitimate early/late fixtures while
-        # still catching a date accidentally assigned to a different season.
         return (
             datetime(season_start, 7, 1, tzinfo=timezone.utc),
             datetime(season_start + 1, 7, 31, 23, 59, 59, tzinfo=timezone.utc),
@@ -101,11 +95,11 @@ class FootballDataProvider:
 
     def _get(self, url: str):
         try:
-            r = requests.get(url, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 404:
+            response = requests.get(url, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 404:
                 return None, 404
-            r.raise_for_status()
-            return r.content, r.status_code
+            response.raise_for_status()
+            return response.content, response.status_code
         except Exception as exc:
             logger.warning("Football-Data fetch failed: %s (%s)", url, exc)
             return None, None
@@ -120,14 +114,12 @@ class FootballDataProvider:
             match = re.fullmatch(r"(.+)_([0-9]{4})", stem)
             if match:
                 code, year_text = match.groups()
-                season_start = int(year_text)
                 source_type = "season_results"
-                source_key = f"{code}:{season_start}"
+                season_start = int(year_text)
             elif stem.endswith("_new"):
                 code = stem[:-4]
-                season_start = None
                 source_type = "combined_results"
-                source_key = f"{code}:new"
+                season_start = None
             else:
                 logger.info("Ignoring unclassified raw CSV: %s", path)
                 continue
@@ -135,9 +127,15 @@ class FootballDataProvider:
             if not league_key:
                 logger.info("Ignoring raw CSV for unconfigured league: %s", path)
                 continue
+            expected = LEAGUE_CONFIG[league_key].get("source_type")
+            if source_type == "season_results" and expected == "single":
+                logger.error("Rejecting season-style file for combined-feed league: %s", path)
+                continue
+            if source_type == "combined_results" and expected != "single":
+                logger.error("Rejecting /new-style file for season-based league: %s", path)
+                continue
             try:
-                df = pd.read_csv(path)
-                frames.append(SourceFrame(df, source_type, source_key, None, season_start))
+                frames.append(SourceFrame(pd.read_csv(path), source_type, f"{league_key}:{season_start}" if season_start is not None else f"{league_key}:new", None, season_start))
             except Exception as exc:
                 logger.warning("Skipping %s: %s", path, exc)
         return frames
@@ -198,17 +196,14 @@ class FootballDataProvider:
                 if not home or not away or home == "nan" or away == "nan" or home == away:
                     continue
                 try:
-                    kickoff, raw_date, raw_time = self._parse_datetime(row)
+                    kickoff, raw_date, _raw_time = self._parse_datetime(row)
                 except ValueError:
                     continue
 
                 if source.source_type == "season_results" and source.season_start is not None:
                     low, high = self._season_bounds(source.season_start)
                     if kickoff < low or kickoff > high:
-                        logger.error(
-                            "Rejected source/season date conflict: source=%s season=%s raw_date=%s kickoff=%s",
-                            source.source_key, source.season_start, raw_date, kickoff.isoformat(),
-                        )
+                        logger.error("Rejected source/season date conflict: source=%s season=%s raw_date=%s kickoff=%s", source.source_key, source.season_start, raw_date, kickoff.isoformat())
                         continue
                     season = f"{source.season_start}-{source.season_start + 1}"
                 else:
@@ -216,10 +211,7 @@ class FootballDataProvider:
 
                 has_result = self._has_result(row)
                 if has_result and kickoff > now:
-                    logger.error(
-                        "Rejected future finished result: source=%s raw_date=%s kickoff=%s home=%s away=%s",
-                        source.source_key, raw_date, kickoff.isoformat(), home, away,
-                    )
+                    logger.error("Rejected future finished result: source=%s raw_date=%s kickoff=%s home=%s away=%s", source.source_key, raw_date, kickoff.isoformat(), home, away)
                     continue
                 status = "finished" if has_result else "scheduled"
                 info = LEAGUE_CONFIG[lk]
@@ -231,12 +223,8 @@ class FootballDataProvider:
                 ftag = pd.to_numeric(pd.Series([row.get("FTAG")]), errors="coerce").iloc[0]
                 source_id_value = row.get("MatchID")
                 source_id = str(source_id_value) if pd.notna(source_id_value) else None
-                m = MatchRecord(
-                    self.name, lk, season, kickoff.isoformat(timespec="seconds"), hk, ak,
-                    status, int(fthg) if pd.notna(fthg) else None,
-                    int(ftag) if pd.notna(ftag) else None, source_id,
-                )
-                matches[m.match_key] = m
+                match = MatchRecord(self.name, lk, season, kickoff.isoformat(timespec="seconds"), hk, ak, status, int(fthg) if pd.notna(fthg) else None, int(ftag) if pd.notna(ftag) else None, source_id)
+                matches[match.match_key] = match
         return list(leagues.values()), list(teams.values()), list(matches.values())
 
     def fetch(self) -> ProviderSnapshot:
