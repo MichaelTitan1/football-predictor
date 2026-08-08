@@ -16,7 +16,7 @@ from typing import Any
 from src.data_pipeline.neon_store import NeonStore
 
 DEFAULT_OUTPUT = Path("neon_future_finished_diagnostic.json")
-PAGE_SIZE = 1000
+PAGE_SIZE = 500
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -33,25 +33,36 @@ def _parse_dt(value: Any) -> datetime | None:
 
 
 def _fetch_all(store: NeonStore, now: datetime) -> list[dict[str, Any]]:
-    """Fetch only the contradiction set, paging to avoid response-size limits."""
+    """Fetch the contradiction set using the actual canonical matches schema.
+
+    NeonStore.select() does not support the filter/order parameter mapping used
+    by an earlier version of this diagnostic, and matches has no provider_key
+    column. Use the same hard-coded SELECT style as neon_data_audit.py instead.
+    This remains strictly read-only.
+    """
     rows: list[dict[str, Any]] = []
     offset = 0
+    sql = """
+        select
+            canonical_key,
+            league_canonical_key,
+            season,
+            kickoff_at,
+            home_team_canonical_key,
+            away_team_canonical_key,
+            status,
+            home_score,
+            away_score,
+            source_provider
+        from matches
+        where status = 'finished'
+          and kickoff_at > %s
+        order by kickoff_at asc, canonical_key asc
+        limit %s offset %s
+    """
+
     while True:
-        page = store.select(
-            "matches",
-            columns=(
-                "canonical_key,provider_key,league_canonical_key,season,kickoff_at,"
-                "home_team_canonical_key,away_team_canonical_key,status,home_score,"
-                "away_score,provider_match_id,created_at,updated_at"
-            ),
-            params={
-                "status": "eq.finished",
-                "kickoff_at": f"gt.{now.isoformat()}",
-                "order": "kickoff_at.asc",
-                "limit": str(PAGE_SIZE),
-                "offset": str(offset),
-            },
-        )
+        page = store._fetchall(sql, (now, PAGE_SIZE, offset))
         rows.extend(page)
         if len(page) < PAGE_SIZE:
             break
@@ -61,9 +72,12 @@ def _fetch_all(store: NeonStore, now: datetime) -> list[dict[str, Any]]:
 
 def _compact_summary(rows: list[dict[str, Any]], now: datetime) -> dict[str, Any]:
     by_league = Counter(str(row.get("league_canonical_key") or "") for row in rows)
-    by_provider = Counter(str(row.get("provider_key") or "") for row in rows)
+    by_provider = Counter(str(row.get("source_provider") or "") for row in rows)
     by_season = Counter(str(row.get("season") or "") for row in rows)
-    with_scores = sum(row.get("home_score") is not None and row.get("away_score") is not None for row in rows)
+    with_scores = sum(
+        row.get("home_score") is not None and row.get("away_score") is not None
+        for row in rows
+    )
     without_scores = len(rows) - with_scores
 
     future_days: list[float] = []
@@ -75,7 +89,10 @@ def _compact_summary(rows: list[dict[str, Any]], now: datetime) -> dict[str, Any
     return {
         "count": len(rows),
         "audit_now_utc": now.isoformat(),
-        "score_presence": {"with_both_scores": with_scores, "without_both_scores": without_scores},
+        "score_presence": {
+            "with_both_scores": with_scores,
+            "without_both_scores": without_scores,
+        },
         "future_days": {
             "min": min(future_days) if future_days else None,
             "max": max(future_days) if future_days else None,
@@ -99,7 +116,7 @@ def run(output_path: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     summary = _compact_summary(rows, now)
 
     report = {
-        "diagnostic_version": "1.0",
+        "diagnostic_version": "1.1",
         "database": "Neon PostgreSQL",
         "read_only": True,
         "query": "status = finished AND kickoff_at > audit_now_utc",
@@ -109,18 +126,24 @@ def run(output_path: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     }
     output_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
-    print(json.dumps({
-        "diagnostic_version": report["diagnostic_version"],
-        "read_only": True,
-        "affected_count": len(rows),
-        "report_path": str(output_path),
-        "provider_breakdown": summary["by_provider"],
-        "league_count": len(summary["by_league"]),
-        "season_breakdown": summary["by_season"],
-        "score_presence": summary["score_presence"],
-        "future_days": summary["future_days"],
-        "sample_first_25": summary["sample_first_25"],
-    }, indent=2, default=str))
+    print(
+        json.dumps(
+            {
+                "diagnostic_version": report["diagnostic_version"],
+                "read_only": True,
+                "affected_count": len(rows),
+                "report_path": str(output_path),
+                "provider_breakdown": summary["by_provider"],
+                "league_count": len(summary["by_league"]),
+                "season_breakdown": summary["by_season"],
+                "score_presence": summary["score_presence"],
+                "future_days": summary["future_days"],
+                "sample_first_25": summary["sample_first_25"],
+            },
+            indent=2,
+            default=str,
+        )
+    )
     return report
 
 
