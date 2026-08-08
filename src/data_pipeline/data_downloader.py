@@ -1,8 +1,8 @@
 """Raw Football-Data source downloader.
 
-This module has one job: download provider CSVs and preserve their raw Date/Time
-values exactly as supplied. It never normalizes dates or decides match status.
-Season-based and combined /new feeds are kept as distinct source resources.
+This module downloads provider CSVs and preserves Date/Time exactly as supplied.
+It never normalizes dates or decides match status. Season-based and combined
+/new feeds remain distinct resources.
 """
 from __future__ import annotations
 
@@ -149,8 +149,7 @@ def _http_get(url: str) -> Tuple[Optional[bytes], Optional[int]]:
 
 
 def _validate_dataframe(df: pd.DataFrame) -> bool:
-    columns = {str(c).strip().lstrip("\ufeff") for c in df.columns}
-    return REQUIRED_COLS.issubset(columns)
+    return REQUIRED_COLS.issubset({str(c).strip().lstrip("\ufeff") for c in df.columns})
 
 
 def _atomic_save_csv(df: pd.DataFrame, path: Path) -> bool:
@@ -180,22 +179,29 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
     url = _candidate_url(league_key, season_start)
     if not url:
         return False
+    resource_key = _resource_key(league_key, season_start)
+    state = _load_source_state()
+    prior = state.get(resource_key, {})
     out_path = RAW_DIR / (f"{league_key}_new.csv" if info.get("source_type") == "single" else f"{league_key}_{season_start}.csv")
     if out_path.exists() and not force_refresh:
         try:
-            if not _validate_dataframe(pd.read_csv(out_path, nrows=5)):
-                return False
+            if _validate_dataframe(pd.read_csv(out_path, nrows=5)) and prior.get("raw_format_version") == RAW_FORMAT_VERSION:
+                return True
         except Exception:
-            return False
-        state = _load_source_state()
-        if state.get(_resource_key(league_key, season_start), {}).get("raw_format_version") == RAW_FORMAT_VERSION:
-            return True
+            pass
 
     data, status = _http_get(url)
     if status == 404:
         mark_football_data_unavailable(league_key, url, status, season_start)
         raise FootballDataUnavailableError(f"Football-Data returned 404 for {league_key}")
     if data is None:
+        return False
+
+    digest = _source_fingerprint(data)
+    # force_refresh is used by the migration only when the previous raw file
+    # was produced by an older writer. Once the raw format is current, an
+    # unchanged provider payload should not rewrite the file unnecessarily.
+    if out_path.exists() and force_refresh and prior.get("raw_format_version") == RAW_FORMAT_VERSION and prior.get("sha256") == digest:
         return False
 
     try:
@@ -211,19 +217,15 @@ def download_season_data(league_key: str, season_start: int, *, force_refresh: b
 
     # Critical rule: Date and Time are written exactly as received. No pandas
     # datetime conversion is permitted in the raw layer.
-    if "League" not in df.columns:
-        df["League"] = league_key
-    if "Tier" not in df.columns:
-        df["Tier"] = info["tier"]
-    if "LeagueStrength" not in df.columns:
-        df["LeagueStrength"] = info["strength"]
-
+    df["League"] = df.get("League", league_key)
+    df["Tier"] = df.get("Tier", info["tier"])
+    df["LeagueStrength"] = df.get("LeagueStrength", info["strength"])
     if not _atomic_save_csv(df, out_path):
         return False
-    state = _load_source_state()
-    state[_resource_key(league_key, season_start)] = {
+
+    state[resource_key] = {
         "url": url,
-        "sha256": _source_fingerprint(data),
+        "sha256": digest,
         "row_count": len(df),
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "raw_format_version": RAW_FORMAT_VERSION,
@@ -250,12 +252,10 @@ def repair_missing_data() -> Dict[str, List[int]]:
     results: Dict[str, List[int]] = {league: [] for league in ALLOWED_LEAGUES}
     current = current_season_start()
     for league in ALLOWED_LEAGUES:
-        info = LEAGUE_CONFIG[league]
-        years = [START_YEAR] if info.get("source_type") == "single" else [current]
-        for year in years:
-            try:
-                if download_season_data(league, year, force_refresh=True, ignore_unavailable=True):
-                    results[league].append(year)
-            except FootballDataUnavailableError:
-                logger.warning("Source unavailable: %s %s", league, year)
+        year = START_YEAR if LEAGUE_CONFIG[league].get("source_type") == "single" else current
+        try:
+            if download_season_data(league, year, force_refresh=True, ignore_unavailable=True):
+                results[league].append(year)
+        except FootballDataUnavailableError:
+            logger.warning("Source unavailable: %s %s", league, year)
     return results
