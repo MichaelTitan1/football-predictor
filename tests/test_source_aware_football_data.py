@@ -66,6 +66,33 @@ def test_combined_new_feed_can_contain_multiple_seasons(tmp_path: Path):
     assert {m.season for m in snapshot.matches} == {"2024-2025", "2025-2026"}
 
 
+def test_same_real_match_from_two_source_files_has_one_canonical_match(tmp_path: Path):
+    _write(
+        tmp_path / "E0_2025.csv",
+        ["09/08/2025,15:00,Alpha,Beta,2,1,H,season-source-id,E0"],
+    )
+    _write(
+        tmp_path / "E0_2026.csv",
+        ["09/08/2025,16:00,Alpha,Beta,2,1,H,other-source-id,E0"],
+    )
+    snapshot = FootballDataProvider(tmp_path, include_remote=False).fetch()
+    assert len(snapshot.matches) == 1
+    assert snapshot.matches[0].source_id in {"season-source-id", "other-source-id"}
+
+
+def test_combined_feed_is_not_accepted_for_season_based_league(tmp_path: Path):
+    _write(
+        tmp_path / "E0_new.csv",
+        ["10/08/2025,15:00,Alpha,Beta,1,0,H,source-x,E0"],
+    )
+    try:
+        FootballDataProvider(tmp_path, include_remote=False).fetch()
+    except RuntimeError as exc:
+        assert "no valid canonical matches" in str(exc)
+    else:
+        raise AssertionError("/new-style feed was accepted for a season-based league")
+
+
 def test_unknown_raw_csv_is_not_merged_into_canonical_source(tmp_path: Path):
     _write(tmp_path / "random.csv", ["10/08/2025,15:00,Alpha,Beta,1,0,H,source-x,E0"])
     try:
