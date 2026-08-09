@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.data_pipeline.football_data_provider import FootballDataProvider
+from src.data_pipeline.football_data_provider import FootballDataProvider, SourceFrame
 
 
 def _write(path: Path, rows: list[str]) -> None:
@@ -54,6 +54,19 @@ def test_future_result_with_scores_is_not_finished(tmp_path: Path):
         raise AssertionError("a future scored result was accepted as canonical data")
 
 
+def test_ambiguous_or_unknown_date_is_not_guessed(tmp_path: Path):
+    _write(
+        tmp_path / "E0_2025.csv",
+        ["08-09-25,15:00,Alpha,Beta,2,1,H,source-ambiguous,E0"],
+    )
+    try:
+        FootballDataProvider(tmp_path, include_remote=False).fetch()
+    except RuntimeError as exc:
+        assert "no valid canonical matches" in str(exc)
+    else:
+        raise AssertionError("unsupported date syntax was silently inferred")
+
+
 def test_combined_new_feed_can_contain_multiple_seasons(tmp_path: Path):
     _write(
         tmp_path / "ARG_new.csv",
@@ -66,18 +79,22 @@ def test_combined_new_feed_can_contain_multiple_seasons(tmp_path: Path):
     assert {m.season for m in snapshot.matches} == {"2024-2025", "2025-2026"}
 
 
-def test_same_real_match_from_two_source_files_has_one_canonical_match(tmp_path: Path):
+def test_same_real_match_from_two_source_frames_has_one_canonical_match(tmp_path: Path):
     _write(
         tmp_path / "E0_2025.csv",
         ["09/08/2025,15:00,Alpha,Beta,2,1,H,season-source-id,E0"],
     )
-    _write(
-        tmp_path / "E0_2026.csv",
-        ["09/08/2025,16:00,Alpha,Beta,2,1,H,other-source-id,E0"],
+    provider = FootballDataProvider(tmp_path, include_remote=False)
+    season_frame = provider._local_frames()[0]
+    duplicate_frame = SourceFrame(
+        season_frame.frame.copy().assign(MatchID="other-source-id", Time="16:00"),
+        "fixture_feed",
+        "fixtures.csv",
+        "fixtures.csv",
+        None,
     )
-    snapshot = FootballDataProvider(tmp_path, include_remote=False).fetch()
-    assert len(snapshot.matches) == 1
-    assert snapshot.matches[0].source_id in {"season-source-id", "other-source-id"}
+    _, _, matches = provider._normalize([season_frame, duplicate_frame])
+    assert len(matches) == 1
 
 
 def test_combined_feed_is_not_accepted_for_season_based_league(tmp_path: Path):
