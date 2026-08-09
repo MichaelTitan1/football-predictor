@@ -56,28 +56,37 @@ class FootballDataProvider:
 
     @staticmethod
     def _parse_datetime(row: pd.Series) -> tuple[datetime, str, str]:
+        """Parse Football-Data dates without allowing pandas to guess.
+
+        The provider's raw Date/Time values are preserved by the downloader.
+        Only explicitly supported formats are accepted here. In particular,
+        there is no pandas date inference fallback because a guessed date can
+        silently move a historical result into the wrong season.
+        """
         raw_date = row.get("Date")
         raw_time = row.get("Time")
         if pd.isna(raw_date):
             raise ValueError("match has no date")
+
         date_text = str(raw_date).strip()
         time_text = "" if pd.isna(raw_time) else str(raw_time).strip()
         value = f"{date_text} {time_text}".strip()
-        formats = ("%d/%m/%Y %H:%M", "%d/%m/%y %H:%M", "%d/%m/%Y", "%d/%m/%y")
+        formats = (
+            "%d/%m/%Y %H:%M",
+            "%d/%m/%y %H:%M",
+            "%d/%m/%Y",
+            "%d/%m/%y",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+        )
         for fmt in formats:
             try:
                 parsed = datetime.strptime(value, fmt).replace(tzinfo=ZoneInfo("Europe/London"))
                 return parsed.astimezone(timezone.utc), date_text, time_text
             except ValueError:
                 continue
-        parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
-        if pd.isna(parsed):
-            raise ValueError(f"unsupported Football-Data date format: {value}")
-        if isinstance(parsed, pd.Timestamp):
-            parsed = parsed.to_pydatetime()
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=ZoneInfo("Europe/London"))
-        return parsed.astimezone(timezone.utc), date_text, time_text
+        raise ValueError(f"unsupported Football-Data date format: {value}")
 
     @staticmethod
     def _season_bounds(season_start: int) -> tuple[datetime, datetime]:
@@ -135,7 +144,15 @@ class FootballDataProvider:
                 logger.error("Rejecting /new-style file for season-based league: %s", path)
                 continue
             try:
-                frames.append(SourceFrame(pd.read_csv(path), source_type, f"{league_key}:{season_start}" if season_start is not None else f"{league_key}:new", None, season_start))
+                frames.append(
+                    SourceFrame(
+                        pd.read_csv(path),
+                        source_type,
+                        f"{league_key}:{season_start}" if season_start is not None else f"{league_key}:new",
+                        None,
+                        season_start,
+                    )
+                )
             except Exception as exc:
                 logger.warning("Skipping %s: %s", path, exc)
         return frames
@@ -203,7 +220,13 @@ class FootballDataProvider:
                 if source.source_type == "season_results" and source.season_start is not None:
                     low, high = self._season_bounds(source.season_start)
                     if kickoff < low or kickoff > high:
-                        logger.error("Rejected source/season date conflict: source=%s season=%s raw_date=%s kickoff=%s", source.source_key, source.season_start, raw_date, kickoff.isoformat())
+                        logger.error(
+                            "Rejected source/season date conflict: source=%s season=%s raw_date=%s kickoff=%s",
+                            source.source_key,
+                            source.season_start,
+                            raw_date,
+                            kickoff.isoformat(),
+                        )
                         continue
                     season = f"{source.season_start}-{source.season_start + 1}"
                 else:
@@ -211,7 +234,14 @@ class FootballDataProvider:
 
                 has_result = self._has_result(row)
                 if has_result and kickoff > now:
-                    logger.error("Rejected future finished result: source=%s raw_date=%s kickoff=%s home=%s away=%s", source.source_key, raw_date, kickoff.isoformat(), home, away)
+                    logger.error(
+                        "Rejected future finished result: source=%s raw_date=%s kickoff=%s home=%s away=%s",
+                        source.source_key,
+                        raw_date,
+                        kickoff.isoformat(),
+                        home,
+                        away,
+                    )
                     continue
                 status = "finished" if has_result else "scheduled"
                 info = LEAGUE_CONFIG[lk]
@@ -223,7 +253,18 @@ class FootballDataProvider:
                 ftag = pd.to_numeric(pd.Series([row.get("FTAG")]), errors="coerce").iloc[0]
                 source_id_value = row.get("MatchID")
                 source_id = str(source_id_value) if pd.notna(source_id_value) else None
-                match = MatchRecord(self.name, lk, season, kickoff.isoformat(timespec="seconds"), hk, ak, status, int(fthg) if pd.notna(fthg) else None, int(ftag) if pd.notna(ftag) else None, source_id)
+                match = MatchRecord(
+                    self.name,
+                    lk,
+                    season,
+                    kickoff.isoformat(timespec="seconds"),
+                    hk,
+                    ak,
+                    status,
+                    int(fthg) if pd.notna(fthg) else None,
+                    int(ftag) if pd.notna(ftag) else None,
+                    source_id,
+                )
                 matches[match.match_key] = match
         return list(leagues.values()), list(teams.values()), list(matches.values())
 
