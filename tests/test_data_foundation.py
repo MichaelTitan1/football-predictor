@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.data_pipeline.canonical_data import LeagueRecord, MatchRecord, TeamRecord, connect, initialize, upsert_records
-from src.data_pipeline.football_data_provider import FootballDataProvider
+from src.data_pipeline.football_data_provider import FootballDataProvider, SourceFrame
 from src.data_pipeline.league_config import api_football_id_map, load_enabled_leagues
 
 
@@ -28,7 +28,9 @@ def test_provider_normalizes_result_statuses_with_authoritative_codes():
         {"League": "E0", "Date": "01/01/2026", "Time": "15:00", "HomeTeam": "Home", "AwayTeam": "Away", "FTHG": 2, "FTAG": 1, "FTR": "H"},
         {"League": "E0", "Date": "02/01/2026", "Time": "18:00", "HomeTeam": "Away", "AwayTeam": "Home", "FTHG": None, "FTAG": None, "FTR": None},
     ])
-    _, _, matches = provider._normalize([frame])
+    _, _, matches = provider._normalize([
+        SourceFrame(frame, "combined_results", "E0:new", None, None)
+    ])
     assert sorted(m.status for m in matches) == ["finished", "scheduled"]
 
 

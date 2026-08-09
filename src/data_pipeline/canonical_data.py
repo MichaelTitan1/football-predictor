@@ -42,9 +42,27 @@ class MatchRecord:
 
     @property
     def match_key(self) -> str:
-        # Prefer a provider's stable source ID so kickoff corrections do not
-        # create duplicate matches. Fall back to deterministic match identity.
-        raw = "|".join([self.provider, "source", self.source_id]) if self.source_id else "|".join([self.provider, self.league_key, self.season or "", self.kickoff_utc, self.home_team, self.away_team])
+        """Provider-independent identity for one real-world league match.
+
+        Provider/source IDs remain evidence identifiers and are protected by
+        Neon provider_records. They must not create separate canonical matches
+        when the same match arrives through another feed or provider.
+
+        UTC calendar date is used rather than exact kickoff time so timezone or
+        kickoff-time formatting corrections do not create a second match.
+        """
+        kickoff = datetime.fromisoformat(self.kickoff_utc.replace("Z", "+00:00"))
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(tzinfo=timezone.utc)
+        kickoff = kickoff.astimezone(timezone.utc)
+        raw = "|".join([
+            "match-v2",
+            self.league_key,
+            self.season or "",
+            kickoff.date().isoformat(),
+            self.home_team,
+            self.away_team,
+        ])
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 def utc_now() -> str: return datetime.now(timezone.utc).isoformat(timespec="seconds")

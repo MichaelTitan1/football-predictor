@@ -152,7 +152,7 @@ def test_neon_dsn_adds_ssl_and_ipv4_hostaddr(monkeypatch):
     dsn = _safe_dsn_for_connect("postgresql://user:secret@example.neon.tech/db")
     assert "sslmode=require" in dsn
     assert "hostaddr=203.0.113.10" in dsn
-    assert "secret" in dsn  # retained for psycopg, but callers never log this DSN
+    assert "secret" in dsn
 
 
 class VerifyCursor:
@@ -172,3 +172,37 @@ def test_neon_select_1_verification_uses_parameterless_probe():
     store = NeonStore(connection=VerifyConnection())
     store.verify_connection()
     assert store.connection.committed is True
+
+
+def test_match_key_is_provider_independent_for_cross_source_deduplication():
+    base = MatchRecord(
+        "football-data.co.uk",
+        "E0",
+        "2025-2026",
+        "2025-08-09T15:00:00+00:00",
+        "arsenal",
+        "chelsea",
+        "finished",
+        2,
+        1,
+        "source-a",
+    )
+    same_match_other_provider = MatchRecord(
+        "another-provider",
+        "E0",
+        "2025-2026",
+        "2025-08-09T16:00:00+01:00",
+        "arsenal",
+        "chelsea",
+        "finished",
+        2,
+        1,
+        "source-b",
+    )
+    assert base.match_key == same_match_other_provider.match_key
+
+
+def test_match_key_keeps_distinct_same_day_opponents_separate():
+    first = MatchRecord("football-data.co.uk", "E0", "2025-2026", "2025-08-09T12:00:00+00:00", "arsenal", "chelsea")
+    second = MatchRecord("another-provider", "E0", "2025-2026", "2025-08-09T18:00:00+00:00", "arsenal", "liverpool")
+    assert first.match_key != second.match_key

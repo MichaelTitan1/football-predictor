@@ -2,8 +2,6 @@ name: Fovra data update
 
 on:
   schedule:
-    # Football-Data publishes updates at least twice weekly; run after the
-    # Monday/Wednesday refresh window in UTC.
     - cron: '10 08 * * 1,3'
   workflow_dispatch:
     inputs:
@@ -32,9 +30,7 @@ jobs:
           path: |
             data/raw
             data/processed/merged_dataset.csv
-          # v2 invalidates the old cache that contains the incorrectly parsed
-          # 16 worldwide all-seasons feeds.
-          key: fovra-football-data-v2-${{ runner.os }}-${{ hashFiles('config/leagues.json') }}
+          key: fovra-football-data-v3-${{ runner.os }}-${{ hashFiles('config/leagues.json') }}
 
       - uses: actions/setup-python@v5
         with:
@@ -50,14 +46,12 @@ jobs:
             echo "task=all" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fast Football-Data 38-league ingestion
+      - name: Source-aware Football-Data 38-league ingestion
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          FOVRA_FAST_STAGE_BATCH: '20000'
-          FOVRA_SINGLE_FEED_TIMEOUT: '60'
-          FOVRA_SINGLE_FEED_RETRIES: '5'
-        run: python -m src.data_pipeline.fast_football_data_ingest_v2
+          FOVRA_NEON_BATCH_SIZE: '500'
+        run: python -m src.data_pipeline.football_data_ingest
 
       - name: Verify Neon PostgreSQL connectivity
         if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions')
