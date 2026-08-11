@@ -94,23 +94,19 @@ jobs:
               print('Unexpected league keys present in Neon: ' + ', '.join(unexpected))
           PY
 
-      - name: Refresh ClubElo team strength
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo'
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          CLUBELO_TIMEOUT_SECONDS: '60'
-          CLUBELO_LOOKBACK_DAYS: '7'
-          CLUBELO_RETRIES: '4'
-        run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
-
-      - name: Build xgabora leakage-safe ML features from xgabora pre-match columns
+      # IMPORTANT: xgabora-enrich deliberately does NOT call the current-day
+      # ClubElo downloader. xgabora Matches.csv already contains the historical
+      # pre-match HomeElo/AwayElo values used by the ML foundation. The separate
+      # `clubelo` task remains available for a future Fovra live-data phase, but
+      # it is never part of the xgabora historical bootstrap/enrichment path.
+      - name: Build xgabora leakage-safe ML features using xgabora historical Elo
         if: steps.task.outputs.task == 'xgabora-enrich'
         env:
           PYTHONPATH: ${{ github.workspace }}
           FOVRA_XGABORA_FEATURE_PATH: data/processed/xgabora_merged_dataset.csv
         run: python -m scripts.build_xgabora_features
 
-      - name: Verify xgabora ML feature artifact
+      - name: Verify xgabora ML feature artifact and historical Elo source
         if: steps.task.outputs.task == 'xgabora-enrich' && success()
         env:
           FOVRA_XGABORA_FEATURE_PATH: data/processed/xgabora_merged_dataset.csv
@@ -137,6 +133,9 @@ jobs:
               raise SystemExit('Feature artifact contains invalid result codes')
           print(json.dumps({
               'status': 'PASS',
+              'source': 'xgabora/Club-Football-Match-Data-2000-2025',
+              'historical_elo_source': 'xgabora Matches.csv HomeElo/AwayElo',
+              'current_clubelo_refresh': False,
               'rows': int(len(df)),
               'elo_rows_with_both_values': int(df[['HomeElo', 'AwayElo']].notna().all(axis=1).sum()),
               'form3_rows_with_both_values': int(df[['Form3Home', 'Form3Away']].notna().all(axis=1).sum()),
@@ -152,6 +151,15 @@ jobs:
           name: fovra-xgabora-ml-features-${{ github.run_id }}
           path: data/processed/xgabora_merged_dataset.csv
           if-no-files-found: error
+
+      - name: Refresh ClubElo team strength
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLUBELO_TIMEOUT_SECONDS: '60'
+          CLUBELO_LOOKBACK_DAYS: '7'
+          CLUBELO_RETRIES: '4'
+        run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
 
       - name: Refresh legacy features
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'features'
