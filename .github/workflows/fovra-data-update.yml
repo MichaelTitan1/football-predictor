@@ -10,7 +10,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, football-data, clubelo, features, predictions, results, bootstrap-historical, xgabora-bootstrap, xgabora-verify]
+        options: [all, football-data, clubelo, features, predictions, results, bootstrap-historical, xgabora-bootstrap, xgabora-verify, xgabora-enrich]
 
 concurrency:
   group: fovra-data-update-${{ github.ref }}
@@ -67,13 +67,13 @@ jobs:
         run: python -m src.data_pipeline.football_data_ingest
 
       - name: Verify Neon PostgreSQL connectivity
-        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions' || steps.task.outputs.task == 'xgabora-bootstrap' || steps.task.outputs.task == 'xgabora-verify')
+        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions' || steps.task.outputs.task == 'xgabora-bootstrap' || steps.task.outputs.task == 'xgabora-verify' || steps.task.outputs.task == 'xgabora-enrich')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -c "from src.data_pipeline.neon_store import NeonStore; store=NeonStore(); store.verify_connection(); print('Neon SELECT 1 succeeded')"
 
       - name: Verify all 38 configured leagues reached Neon
-        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical' || steps.task.outputs.task == 'xgabora-bootstrap' || steps.task.outputs.task == 'xgabora-verify')
+        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical' || steps.task.outputs.task == 'xgabora-bootstrap' || steps.task.outputs.task == 'xgabora-verify' || steps.task.outputs.task == 'xgabora-enrich')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
@@ -95,7 +95,7 @@ jobs:
           PY
 
       - name: Refresh ClubElo team strength
-        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo')
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'xgabora-enrich'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           CLUBELO_TIMEOUT_SECONDS: '60'
@@ -103,14 +103,19 @@ jobs:
           CLUBELO_RETRIES: '4'
         run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
 
-      - name: Refresh features
+      - name: Build xgabora leakage-safe ML features
+        if: steps.task.outputs.task == 'xgabora-enrich'
+        run: python scripts/build_xgabora_features.py
+
+      - name: Refresh legacy features
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'features'
         run: python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Generate and archive Match Winner 1X2 predictions
-        if: steps.task.outputs.task == 'predictions'
+        if: steps.task.outputs.task == 'predictions' || steps.task.outputs.task == 'xgabora-enrich'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FOOTBALL_MODEL_PATH: models/football_model.cbm
           FOOTBALL_CALIBRATION_PATH: models/football_model_confidence.joblib
+          FOVRA_XGABORA_FEATURE_PATH: data/processed/xgabora_merged_dataset.csv
         run: python -m src.prediction.generate_predictions
