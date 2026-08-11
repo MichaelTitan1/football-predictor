@@ -29,6 +29,7 @@ PREMATCH = {
     "HomeElo", "AwayElo", "Form3Home", "Form3Away",
     "Form5Home", "Form5Away", "OddHome", "OddDraw", "OddAway",
 }
+VALID_RESULTS = {"H", "D", "A"}
 
 
 def load_matches() -> pd.DataFrame:
@@ -58,12 +59,23 @@ def main() -> int:
 
     dates = pd.to_datetime(df["MatchDate"], errors="coerce", utc=True)
     df = df.assign(_date=dates)
+
+    # Date integrity is audited against the complete source before the
+    # bootstrap-window filter, so invalid/future rows cannot be hidden by it.
+    invalid_dates = int(dates.isna().sum())
+    now = pd.Timestamp.now(tz="UTC")
+    future_rows = int((dates.notna() & (dates > now)).sum())
+
     window = df[(df["_date"] >= START_DATE) & (df["_date"] < END_DATE)].copy()
 
-    future_rows = int((window["_date"] > pd.Timestamp.now(tz="UTC")).sum())
-    invalid_dates = int(window["_date"].isna().sum())
-    missing_scores = int(window[["FTHome", "FTAway", "FTResult"]].isna().any(axis=1).sum())
-    bad_results = int(~window["FTResult"].astype(str).str.upper().isin({"H", "D", "A"}).fillna(False).sum())
+    result_values = window["FTResult"].astype("string").str.strip().str.upper()
+    missing_result = int(result_values.isna().sum())
+    invalid_result_codes = int(
+        (result_values.notna() & ~result_values.isin(VALID_RESULTS)).sum()
+    )
+    missing_scores = int(
+        window[["FTHome", "FTAway", "FTResult"]].isna().any(axis=1).sum()
+    )
 
     identities = canonical_identity(window)
     duplicate_rows = int(identities.duplicated(keep=False).sum())
@@ -75,7 +87,15 @@ def main() -> int:
     }
 
     report = {
-        "status": "PASS" if not (future_rows or invalid_dates or missing_scores or bad_results or duplicate_rows) else "FAIL",
+        "status": "PASS"
+        if not (
+            future_rows
+            or invalid_dates
+            or missing_scores
+            or invalid_result_codes
+            or duplicate_rows
+        )
+        else "FAIL",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "xgabora/Club-Football-Match-Data-2000-2025",
         "source_url": MATCHES_URL,
@@ -87,7 +107,8 @@ def main() -> int:
         "invalid_dates": invalid_dates,
         "future_dated_rows": future_rows,
         "missing_score_or_result_rows": missing_scores,
-        "invalid_result_code_rows": bad_results,
+        "missing_result_rows": missing_result,
+        "invalid_result_code_rows": invalid_result_codes,
         "date_min": None if window.empty else window["_date"].min().isoformat(),
         "date_max": None if window.empty else window["_date"].max().isoformat(),
         "league_count": int(window["Division"].nunique(dropna=True)),
