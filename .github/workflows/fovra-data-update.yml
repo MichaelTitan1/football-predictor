@@ -105,7 +105,45 @@ jobs:
 
       - name: Build xgabora leakage-safe ML features from xgabora pre-match columns
         if: steps.task.outputs.task == 'xgabora-enrich'
-        run: python scripts/build_xgabora_features.py
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          FOVRA_XGABORA_FEATURE_PATH: data/processed/xgabora_merged_dataset.csv
+        run: python -m scripts.build_xgabora_features
+
+      - name: Verify xgabora ML feature artifact
+        if: steps.task.outputs.task == 'xgabora-enrich' && success()
+        env:
+          FOVRA_XGABORA_FEATURE_PATH: data/processed/xgabora_merged_dataset.csv
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import pandas as pd
+
+          path = Path(os.environ['FOVRA_XGABORA_FEATURE_PATH'])
+          if not path.exists():
+              raise SystemExit(f'Missing xgabora feature artifact: {path}')
+          df = pd.read_csv(path, low_memory=False)
+          required = {'Date', 'HomeTeam', 'AwayTeam', 'League', 'FTHG', 'FTAG', 'FTR', 'HomeElo', 'AwayElo', 'Form3Home', 'Form3Away', 'Form5Home', 'Form5Away', 'OddHome', 'OddDraw', 'OddAway'}
+          missing = sorted(required - set(df.columns))
+          if missing:
+              raise SystemExit(f'Missing required xgabora feature columns: {missing}')
+          if len(df) != 168120:
+              raise SystemExit(f'Expected 168120 feature rows, got {len(df)}')
+          if df[['Date', 'HomeTeam', 'AwayTeam', 'League']].isna().any().any():
+              raise SystemExit('Feature artifact contains null match identity fields')
+          if df['FTR'].isin(['H', 'D', 'A']).all() is False:
+              raise SystemExit('Feature artifact contains invalid result codes')
+          print(json.dumps({
+              'status': 'PASS',
+              'rows': int(len(df)),
+              'elo_rows_with_both_values': int(df[['HomeElo', 'AwayElo']].notna().all(axis=1).sum()),
+              'form3_rows_with_both_values': int(df[['Form3Home', 'Form3Away']].notna().all(axis=1).sum()),
+              'form5_rows_with_both_values': int(df[['Form5Home', 'Form5Away']].notna().all(axis=1).sum()),
+              'odds_rows_with_all_1x2': int(df[['OddHome', 'OddDraw', 'OddAway']].notna().all(axis=1).sum()),
+          }, indent=2, sort_keys=True))
+          PY
 
       - name: Archive xgabora feature artifact
         if: steps.task.outputs.task == 'xgabora-enrich' && success()
