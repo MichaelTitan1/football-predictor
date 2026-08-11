@@ -95,7 +95,7 @@ jobs:
           PY
 
       - name: Refresh ClubElo team strength
-        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'xgabora-enrich'
+        if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'clubelo'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           CLUBELO_TIMEOUT_SECONDS: '60'
@@ -103,16 +103,24 @@ jobs:
           CLUBELO_RETRIES: '4'
         run: python -c "from src.data_pipeline.enrichment import refresh_clubelo; print(refresh_clubelo())"
 
-      - name: Build xgabora leakage-safe ML features
+      - name: Build xgabora leakage-safe ML features from xgabora pre-match columns
         if: steps.task.outputs.task == 'xgabora-enrich'
         run: python scripts/build_xgabora_features.py
+
+      - name: Archive xgabora feature artifact
+        if: steps.task.outputs.task == 'xgabora-enrich' && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fovra-xgabora-ml-features-${{ github.run_id }}
+          path: data/processed/xgabora_merged_dataset.csv
+          if-no-files-found: error
 
       - name: Refresh legacy features
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'features'
         run: python -m src.data_pipeline.prepare_merged_dataset
 
       - name: Generate and archive Match Winner 1X2 predictions
-        if: steps.task.outputs.task == 'predictions' || steps.task.outputs.task == 'xgabora-enrich'
+        if: steps.task.outputs.task == 'predictions'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FOOTBALL_MODEL_PATH: models/football_model.cbm
