@@ -1,9 +1,14 @@
 """Read-only audit of the xgabora historical football dataset.
 
 This deliberately performs NO Neon writes. It downloads xgabora's published
-Matches.csv, filters the proposed 2010/11-2024/25 bootstrap window, and checks
-schema, dates, duplicate match identities, result integrity, league coverage,
-and pre-match feature availability before any migration is attempted.
+Matches.csv, filters the proposed 2010/11-2024/25 bootstrap window, checks
+source/schema/date/identity integrity, and applies the same important ML
+boundary as the bootstrap: rows without a complete final result are
+quarantined from the ML-ready set rather than making the whole source fail.
+
+The raw xgabora source is never modified by this audit. Incomplete rows are
+reported separately so they remain visible for evidence/review but cannot
+enter the completed-match training set.
 """
 from __future__ import annotations
 
@@ -68,22 +73,32 @@ def main() -> int:
 
     window = df[(df["_date"] >= START_DATE) & (df["_date"] < END_DATE)].copy()
 
+    # Keep the raw window intact for diagnostics, then quarantine rows that
+    # cannot represent a completed match. These rows are evidence only and
+    # must never enter the ML-ready/training population.
     result_values = window["FTResult"].astype("string").str.strip().str.upper()
-    missing_result = int(result_values.isna().sum())
-    invalid_result_codes = int(
-        (result_values.notna() & ~result_values.isin(VALID_RESULTS)).sum()
-    )
-    missing_scores = int(
-        window[["FTHome", "FTAway", "FTResult"]].isna().any(axis=1).sum()
-    )
+    result_missing_mask = result_values.isna()
+    result_invalid_mask = result_values.notna() & ~result_values.isin(VALID_RESULTS)
+    score_missing_mask = window[["FTHome", "FTAway"]].isna().any(axis=1)
+    incomplete_mask = result_missing_mask | score_missing_mask
+
+    missing_result = int(result_missing_mask.sum())
+    invalid_result_codes = int(result_invalid_mask.sum())
+    missing_scores = int(score_missing_mask.sum())
+    quarantined_incomplete = int(incomplete_mask.sum())
+
+    # Rows with invalid result codes are a real integrity failure, not a
+    # harmless incomplete record, so they remain fatal. Missing final-result
+    # fields are handled by the quarantine boundary above.
+    ml_ready = window.loc[~incomplete_mask].copy()
 
     identities = canonical_identity(window)
     duplicate_rows = int(identities.duplicated(keep=False).sum())
     unique_matches = int(identities.nunique())
 
     feature_coverage = {
-        column: round(float(window[column].notna().mean()), 6)
-        for column in sorted(PREMATCH & set(window.columns))
+        column: round(float(ml_ready[column].notna().mean()), 6)
+        for column in sorted(PREMATCH & set(ml_ready.columns))
     }
 
     report = {
@@ -91,7 +106,6 @@ def main() -> int:
         if not (
             future_rows
             or invalid_dates
-            or missing_scores
             or invalid_result_codes
             or duplicate_rows
         )
@@ -102,11 +116,13 @@ def main() -> int:
         "original_rows": original_rows,
         "bootstrap_window": "2010/11-2024/25",
         "window_rows": len(window),
+        "valid_completed_matches": len(ml_ready),
+        "quarantined_incomplete_rows": quarantined_incomplete,
         "unique_match_identities": unique_matches,
         "duplicate_rows_by_basic_identity": duplicate_rows,
         "invalid_dates": invalid_dates,
         "future_dated_rows": future_rows,
-        "missing_score_or_result_rows": missing_scores,
+        "missing_score_or_result_rows": int(incomplete_mask.sum()),
         "missing_result_rows": missing_result,
         "invalid_result_code_rows": invalid_result_codes,
         "date_min": None if window.empty else window["_date"].min().isoformat(),
