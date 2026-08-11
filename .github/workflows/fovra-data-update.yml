@@ -133,7 +133,7 @@ jobs:
               raise SystemExit(f'Expected 168120 feature rows, got {len(df)}')
           if df[['Date', 'HomeTeam', 'AwayTeam', 'League']].isna().any().any():
               raise SystemExit('Feature artifact contains null match identity fields')
-          if df['FTR'].isin(['H', 'D', 'A']).all() is False:
+          if not bool(df['FTR'].isin(['H', 'D', 'A']).all()):
               raise SystemExit('Feature artifact contains invalid result codes')
           print(json.dumps({
               'status': 'PASS',
