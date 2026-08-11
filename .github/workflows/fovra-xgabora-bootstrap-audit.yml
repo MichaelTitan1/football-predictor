@@ -1,0 +1,36 @@
+name: Fovra xgabora bootstrap audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - xgabora-foundation-migration
+    paths:
+      - scripts/xgabora_bootstrap_audit.py
+      - .github/workflows/fovra-xgabora-bootstrap-audit.yml
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install audit dependency
+        run: python -m pip install --disable-pip-version-check pandas
+
+      - name: Run read-only xgabora audit
+        run: python scripts/xgabora_bootstrap_audit.py | tee xgabora_bootstrap_audit.json
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fovra-xgabora-bootstrap-audit
+          path: xgabora_bootstrap_audit.json
