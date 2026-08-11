@@ -10,7 +10,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, football-data, clubelo, features, predictions, results, bootstrap-historical]
+        options: [all, football-data, clubelo, features, predictions, results, bootstrap-historical, xgabora-bootstrap]
 
 concurrency:
   group: fovra-data-update-${{ github.ref }}
@@ -46,6 +46,13 @@ jobs:
             echo "task=all" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Bootstrap audited xgabora historical dataset into Neon
+        if: steps.task.outputs.task == 'xgabora-bootstrap'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FOVRA_NEON_BATCH_SIZE: '500'
+        run: python scripts/xgabora_neon_bootstrap.py
+
       - name: Source-aware Football-Data 38-league ingestion
         if: steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical'
         env:
@@ -54,13 +61,13 @@ jobs:
         run: python -m src.data_pipeline.football_data_ingest
 
       - name: Verify Neon PostgreSQL connectivity
-        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions')
+        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'results' || steps.task.outputs.task == 'clubelo' || steps.task.outputs.task == 'predictions' || steps.task.outputs.task == 'xgabora-bootstrap')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -c "from src.data_pipeline.neon_store import NeonStore; store=NeonStore(); store.verify_connection(); print('Neon SELECT 1 succeeded')"
 
       - name: Verify all 38 configured leagues reached Neon
-        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical')
+        if: always() && (steps.task.outputs.task == 'all' || steps.task.outputs.task == 'football-data' || steps.task.outputs.task == 'bootstrap-historical' || steps.task.outputs.task == 'xgabora-bootstrap')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
