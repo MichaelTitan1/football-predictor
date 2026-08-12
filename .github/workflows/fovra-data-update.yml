@@ -47,7 +47,7 @@ jobs:
           fi
 
       - name: Bootstrap audited xgabora historical dataset into Neon
-        if: steps.task.outputs.task == 'xgabora-bootstrap'
+        if: steps.task.outputs.task == 'xgabora-bootstrap' || steps.task.outputs.task == 'xgabora-enrich'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FOVRA_NEON_BATCH_SIZE: '500'
@@ -94,11 +94,10 @@ jobs:
               print('Unexpected league keys present in Neon: ' + ', '.join(unexpected))
           PY
 
-      # IMPORTANT: xgabora-enrich deliberately does NOT call the current-day
-      # ClubElo downloader. xgabora Matches.csv already contains the historical
-      # pre-match HomeElo/AwayElo values used by the ML foundation. The separate
-      # `clubelo` task remains available for a future Fovra live-data phase, but
-      # it is never part of the xgabora historical bootstrap/enrichment path.
+      # xgabora-enrich is intentionally xgabora-only. It refreshes the Neon
+      # historical foundation from xgabora Matches.csv, then builds the ML
+      # feature artifact from that same source. It does NOT call the current-day
+      # ClubElo downloader and does NOT use the legacy Football-Data dataset.
       - name: Build xgabora leakage-safe ML features using xgabora historical Elo
         if: steps.task.outputs.task == 'xgabora-enrich'
         env:
